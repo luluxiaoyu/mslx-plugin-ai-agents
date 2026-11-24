@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, ref } from 'vue';
+import { computed, nextTick, onMounted, ref, watch } from 'vue';
 import { MessagePlugin } from 'tdesign-vue-next';
 import { AddIcon, BrowseIcon, CopyIcon, RefreshIcon } from 'tdesign-icons-vue-next';
 import {
@@ -14,6 +14,10 @@ const endpoints = getMcpEndpointUrls();
 const transport = ref<'http' | 'sse'>('http');
 const endpoint = computed(() => transport.value === 'http' ? endpoints.streamableHttpUrl : endpoints.sseUrl);
 const transportLabel = computed(() => transport.value === 'http' ? 'Streamable HTTP' : 'SSE');
+const transportOptions = [
+  { label: 'Streamable HTTP', value: 'http' },
+  { label: 'SSE（旧版客户端）', value: 'sse' },
+];
 const isLocalEndpoint = computed(() => {
   try {
     const hostname = new URL(endpoint.value).hostname.replace(/\.$/, '');
@@ -49,6 +53,11 @@ const selectedToken = computed(() => usableTokens.value.find((token) => token.id
 const maskedToken = (token: McpTokenModel) => token.maskedToken || (token.token.length > 12
   ? `${token.token.slice(0, 8)}…${token.token.slice(-4)}`
   : '••••••••');
+const tokenOptions = computed(() => usableTokens.value.map((token) => ({
+  label: `${token.name} · ${maskedToken(token).slice(-4)}`,
+  value: token.id,
+})));
+const tokenPlaceholder = computed(() => tokensLoading.value ? '加载中…' : '暂无可用令牌');
 
 function formatExpiration(expiresAt: string | null) {
   if (!expiresAt) return '永久有效';
@@ -75,10 +84,8 @@ async function loadTokens() {
   }
 }
 
-function buildPrompt(token: string) {
-  return `${presetText}
-
-MCP 连接方式：${transportLabel.value}
+function buildPromptDetails(token: string) {
+  return `MCP 连接方式：${transportLabel.value}
 服务地址：${endpoint.value}
 请求头：Authorization: Bearer ${token}
 运维指南：${endpoints.skillMdUrl}
@@ -97,7 +104,9 @@ function buildConfig(token: string) {
   }, null, 2);
 }
 
-const configPreview = computed(() => buildConfig(selectedToken.value ? maskedToken(selectedToken.value) : 'YOUR_MCP_TOKEN'));
+const previewToken = computed(() => selectedToken.value ? maskedToken(selectedToken.value) : 'YOUR_MCP_TOKEN');
+const configPreview = computed(() => buildConfig(previewToken.value));
+const promptDetailsPreview = computed(() => buildPromptDetails(previewToken.value));
 
 async function copyText(text: string, label: string) {
   if (!text) return false;
@@ -155,8 +164,19 @@ const revokeHeading = ref<HTMLElement | null>(null);
 const tokensHeading = ref<HTMLElement | null>(null);
 const name = ref('');
 const expireDays = ref(30);
+const expirationOptions = [
+  { label: '7 天', value: 7 },
+  { label: '30 天', value: 30 },
+  { label: '90 天', value: 90 },
+  { label: '180 天', value: 180 },
+  { label: '永久有效', value: 0 },
+];
 const nameError = ref('');
 const createError = ref('');
+
+watch([selectedTokenId, transport], () => {
+  promptCopied.value = false;
+});
 
 async function addToken(name: string, expireDays: number) {
   const token = await createMcpToken({ name, expireDays });
@@ -174,7 +194,7 @@ async function handleQuickConnect() {
   if (token === null) return;
 
   if (token) {
-    promptCopied.value = await copyText(buildPrompt(token.token), '这段话');
+    promptCopied.value = await copyText(`${presetText}\n\n${buildPromptDetails(token.token)}`, '这段话');
     return;
   }
 
@@ -205,7 +225,7 @@ function restoreDialogFocus() {
 function keepDialogFocus(event: KeyboardEvent) {
   if (!(event.currentTarget instanceof HTMLElement)) return;
   const controls = Array.from(event.currentTarget.querySelectorAll<HTMLElement>(
-    'button:not([disabled]), input:not([disabled]), select:not([disabled]), a[href]',
+    'button:not([disabled]), input:not([disabled]), a[href]',
   )).filter((element) => element.tabIndex >= 0 && element.getClientRects().length > 0);
   const focused = controls.indexOf(document.activeElement as HTMLElement);
   const boundary = event.shiftKey ? 0 : controls.length - 1;
@@ -223,6 +243,12 @@ function openCreate(event: MouseEvent) {
   createError.value = '';
   createdToken.value = null;
   createOpen.value = true;
+}
+
+function submitNameWithEnter(event: KeyboardEvent) {
+  if (event.isComposing) return;
+  event.preventDefault();
+  void createToken();
 }
 
 async function createToken() {
@@ -313,19 +339,37 @@ onMounted(loadTokens);
           <h3>复制这段话</h3>
           <div class="preset">
             <p>{{ presetText }}</p>
-            <t-button
-              theme="primary"
-              :loading="tokensLoading || creating"
-              :aria-describedby="isLocalEndpoint ? 'mcp-local-address-hint' : undefined"
-              @click="handleQuickConnect"
-            >
-              <template #icon>
-                <CopyIcon v-if="selectedToken" aria-hidden="true" />
-                <AddIcon v-else-if="!loadError" aria-hidden="true" />
-                <RefreshIcon v-else aria-hidden="true" />
-              </template>
-              {{ tokensLoading ? '正在准备…' : selectedToken ? '复制这段话' : loadError ? '重新加载' : '先生成连接钥匙' }}
-            </t-button>
+            <details class="preview-details prompt-preview">
+              <summary>查看完整内容</summary>
+              <pre class="config-code" translate="no"><code>{{ promptDetailsPreview }}</code></pre>
+              <p v-if="selectedToken" class="prompt-token-hint">复制时会填入所选令牌的完整值。</p>
+            </details>
+            <div class="preset-actions">
+              <label class="mcp-field">
+                <span>访问令牌</span>
+                <t-select
+                  v-model="selectedTokenId"
+                  class="mcp-select"
+                  :options="tokenOptions"
+                  :placeholder="tokenPlaceholder"
+                  :input-props="{ name: 'mcp-prompt-token' }"
+                  :disabled="tokensLoading || creating || !usableTokens.length"
+                />
+              </label>
+              <t-button
+                theme="primary"
+                :loading="tokensLoading || creating"
+                :aria-describedby="isLocalEndpoint ? 'mcp-local-address-hint' : undefined"
+                @click="handleQuickConnect"
+              >
+                <template #icon>
+                  <CopyIcon v-if="selectedToken" aria-hidden="true" />
+                  <AddIcon v-else-if="!loadError" aria-hidden="true" />
+                  <RefreshIcon v-else aria-hidden="true" />
+                </template>
+                {{ tokensLoading ? '正在准备…' : selectedToken ? '复制这段话' : loadError ? '重新加载' : '先生成连接钥匙' }}
+              </t-button>
+            </div>
           </div>
           <p v-if="quickError" class="field-error" role="alert">{{ quickError }}</p>
           <p v-else-if="!tokensLoading && !selectedToken">
@@ -358,17 +402,23 @@ onMounted(loadTokens);
             <div class="connection-fields">
               <label class="mcp-field">
                 <span>传输协议</span>
-                <select v-model="transport" class="mcp-control" name="mcp-transport">
-                  <option value="http">Streamable HTTP</option>
-                  <option value="sse">SSE（旧版客户端）</option>
-                </select>
+                <t-select
+                  v-model="transport"
+                  class="mcp-select"
+                  :options="transportOptions"
+                  :input-props="{ name: 'mcp-transport' }"
+                />
               </label>
               <label class="mcp-field">
                 <span>访问令牌</span>
-                <select v-model="selectedTokenId" class="mcp-control" name="mcp-token" :disabled="!usableTokens.length">
-                  <option v-if="!usableTokens.length" value="">{{ tokensLoading ? '加载中…' : '暂无可用令牌' }}</option>
-                  <option v-for="token in usableTokens" :key="token.id" :value="token.id">{{ token.name }} · {{ maskedToken(token).slice(-4) }}</option>
-                </select>
+                <t-select
+                  v-model="selectedTokenId"
+                  class="mcp-select"
+                  :options="tokenOptions"
+                  :placeholder="tokenPlaceholder"
+                  :input-props="{ name: 'mcp-config-token' }"
+                  :disabled="tokensLoading || creating || !usableTokens.length"
+                />
               </label>
             </div>
 
@@ -515,18 +565,19 @@ onMounted(loadTokens);
             :aria-invalid="!!nameError"
             :aria-describedby="nameError ? 'mcp-name-error' : undefined"
             @input="nameError = ''"
+            @keydown.enter="submitNameWithEnter"
           />
         </label>
         <p v-if="nameError" id="mcp-name-error" class="field-error" role="alert">{{ nameError }}</p>
         <label class="mcp-field">
           <span>有效期</span>
-          <select v-model="expireDays" class="mcp-control" name="mcp-token-expiration" :disabled="creating">
-            <option :value="7">7 天</option>
-            <option :value="30">30 天</option>
-            <option :value="90">90 天</option>
-            <option :value="180">180 天</option>
-            <option :value="0">永久有效</option>
-          </select>
+          <t-select
+            v-model="expireDays"
+            class="mcp-select"
+            :options="expirationOptions"
+            :input-props="{ name: 'mcp-token-expiration' }"
+            :disabled="creating"
+          />
         </label>
         <p v-if="createError" class="field-error" role="alert">{{ createError }}</p>
       </form>
@@ -638,7 +689,7 @@ onMounted(loadTokens);
 
 .preset {
   display: grid;
-  justify-items: start;
+  min-width: 0;
   gap: 12px;
   padding: 12px 13px;
   border: 1px solid var(--td-component-border);
@@ -649,6 +700,33 @@ onMounted(loadTokens);
 .preset p {
   color: var(--td-text-color-primary);
   font-size: 14px;
+}
+
+.prompt-preview {
+  min-width: 0;
+  border: 1px solid var(--td-component-border);
+  border-radius: 8px;
+}
+
+.prompt-preview .config-code {
+  background: var(--td-bg-color-container);
+}
+
+.preset .prompt-token-hint {
+  padding: 8px 12px;
+  color: var(--td-text-color-secondary);
+  font-size: 12px;
+}
+
+.preset-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: 8px 10px;
+}
+
+.preset-actions .mcp-field {
+  flex: 1 1 160px;
 }
 
 .preset + p {
@@ -751,6 +829,11 @@ onMounted(loadTokens);
   gap: 6px;
   font-size: 13px;
   font-weight: 500;
+}
+
+.mcp-select {
+  width: 100%;
+  min-width: 0;
 }
 
 .mcp-control {
@@ -966,6 +1049,7 @@ html[theme-mode="dark"] .mcp-control {
   .client-link,
   .advanced-settings > summary,
   .mcp-control,
+  .mcp-select :deep(.t-input),
   .preview-details summary,
   .mcp-management .t-button,
   .mcp-token-dialog :deep(.t-button) {
