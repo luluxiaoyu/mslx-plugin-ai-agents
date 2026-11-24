@@ -7,11 +7,11 @@ export interface AiSettingsModel {
   aiModelName: string;
 }
 
-const SETTINGS_URL = '/api/plugin/mslx-plugins-ai-agents/settings';
-const MCP_TOKENS_URL = '/api/plugin/mslx-plugins-ai-agents/settings/mcp/tokens';
-const CHAT_URL = '/api/plugin/mslx-plugins-ai-agents/ai/chat';
-const CONFIRM_TOOL_URL = '/api/plugin/mslx-plugins-ai-agents/ai/confirm-tool';
-const HUB_URL = '/api/hubs/plugin/mslx-plugins-ai-agents/chat';
+const SETTINGS_URL = '/api/plugin/mslx-plugin-ai-agents/settings';
+const MCP_TOKENS_URL = '/api/plugin/mslx-plugin-ai-agents/settings/mcp/tokens';
+const CHAT_URL = '/api/plugin/mslx-plugin-ai-agents/ai/chat';
+const CONFIRM_TOOL_URL = '/api/plugin/mslx-plugin-ai-agents/ai/confirm-tool';
+const HUB_URL = '/api/hubs/plugin/mslx-plugin-ai-agents/chat';
 
 export interface McpTokenModel {
   id: string;
@@ -142,7 +142,7 @@ export async function revokeMcpToken(id: string): Promise<void> {
 
 export function getMcpEndpointUrls() {
   const rawBase = getBaseUrl() || (typeof window !== 'undefined' ? window.location.origin : 'http://localhost:25333');
-  const base = `${rawBase.replace(/\/+$/, '')}/api/plugin/mslx-plugins-ai-agents/mcp`;
+  const base = `${rawBase.replace(/\/+$/, '')}/api/plugin/mslx-plugin-ai-agents/mcp`;
   return {
     streamableHttpUrl: base,
     sseUrl: `${base}/sse`,

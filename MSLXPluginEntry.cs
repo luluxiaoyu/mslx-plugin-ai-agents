@@ -17,15 +17,15 @@ public class MSLXPluginEntry : IPlugin
 {
     public static MSLXPluginEntry Instance { get; private set; } = null!;
     public static IServiceProvider? ServiceProvider { get; private set; }
-    public string Id => "mslx-plugins-ai-agents";
+    public string Id => "mslx-plugin-ai-agents";
     public string Name => "AI 助手";
     public string Description => "支持在线对话 & MCP 服务的 AI 助手插件，可让AI助手帮您操作 MSLX。";
-    public string Version => "1.0.2";
+    public string Version => "1.0.3";
     public string Icon => "f06867909c1984881489196158935cf0_3785578587551796133.png";
     public string MinSDKVersion => "1.7.9";
     public string Developer => "luluxiaoyu";
     public string AuthorUrl => "https://github.com/luluxiaoyu/mslx-plugin-ai-agents";
-    public string PluginUrl => "https://github.com/luluxiaoyu/mslx-plugin-ai-agents/mslx-plugins-ai-agents";
+    public string PluginUrl => "https://github.com/luluxiaoyu/mslx-plugin-ai-agents";
     public PluginMultiNodeSupport SupportsMultiNode => PluginMultiNodeSupport.Supported;
 
     public void OnPluginInitialize(IServiceProvider serviceProvider)
@@ -37,23 +37,23 @@ public class MSLXPluginEntry : IPlugin
         {
             Directory.CreateDirectory(dataDir);
         }
-        SDK.MSLX.Logger.Info("mslx-plugins-ai-agents 初始化成功~");
+        SDK.MSLX.Logger.Info("mslx-plugin-ai-agents 初始化成功~");
     }
 
     public void OnLoad()
     {
-        SDK.MSLX.Logger.Info("mslx-plugins-ai-agents 载入成功~");
+        SDK.MSLX.Logger.Info("mslx-plugin-ai-agents 载入成功~");
     }
 
     public void OnUnload()
     {
         McpController.CloseLegacySessions();
-        SDK.MSLX.Logger.Info("mslx-plugins-ai-agents 卸载成功~");
+        SDK.MSLX.Logger.Info("mslx-plugin-ai-agents 卸载成功~");
     }
 
     public void OnRegisterEndpoints(IEndpointRouteBuilder endpoints)
     {
-        endpoints.MapHub<AiChatHub>("/api/hubs/plugin/mslx-plugins-ai-agents/chat");
+        endpoints.MapHub<AiChatHub>("/api/hubs/plugin/mslx-plugin-ai-agents/chat");
     }
 
     public void OnRegisterServices(IServiceCollection services)

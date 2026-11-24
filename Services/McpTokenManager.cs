@@ -34,7 +34,7 @@ public class McpTokenManager
                 }
                 catch
                 {
-                    dataDir = Path.Combine(AppContext.BaseDirectory, "DaemonData", "PluginsData", "mslx-plugins-ai-agents");
+                    dataDir = Path.Combine(AppContext.BaseDirectory, "DaemonData", "PluginsData", "mslx-plugin-ai-agents");
                 }
 
                 if (!Directory.Exists(dataDir))

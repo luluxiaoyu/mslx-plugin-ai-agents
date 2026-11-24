@@ -48,8 +48,8 @@ public static class AiSkillManager
             {
                 Path.Combine(AppContext.BaseDirectory, "Skills"),
                 Path.Combine(Directory.GetCurrentDirectory(), "Skills"),
-                Path.Combine(Directory.GetCurrentDirectory(), "plugins", "mslx-plugins-ai-agents", "Skills"),
-                Path.Combine(Directory.GetCurrentDirectory(), "Plugins", "mslx-plugins-ai-agents", "Skills"),
+                Path.Combine(Directory.GetCurrentDirectory(), "plugins", "mslx-plugin-ai-agents", "Skills"),
+                Path.Combine(Directory.GetCurrentDirectory(), "Plugins", "mslx-plugin-ai-agents", "Skills"),
                 Path.Combine(Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location) ?? "", "Skills")
             };
 
@@ -139,8 +139,8 @@ public static class AiSkillManager
         {
             Path.Combine(AppContext.BaseDirectory, "Skills", "SKILL.md"),
             Path.Combine(Directory.GetCurrentDirectory(), "Skills", "SKILL.md"),
-            Path.Combine(Directory.GetCurrentDirectory(), "plugins", "mslx-plugins-ai-agents", "Skills", "SKILL.md"),
-            Path.Combine(Directory.GetCurrentDirectory(), "Plugins", "mslx-plugins-ai-agents", "Skills", "SKILL.md"),
+            Path.Combine(Directory.GetCurrentDirectory(), "plugins", "mslx-plugin-ai-agents", "Skills", "SKILL.md"),
+            Path.Combine(Directory.GetCurrentDirectory(), "Plugins", "mslx-plugin-ai-agents", "Skills", "SKILL.md"),
             Path.Combine(Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location) ?? "", "Skills", "SKILL.md")
         };
 

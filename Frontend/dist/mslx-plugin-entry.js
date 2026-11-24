@@ -135498,7 +135498,7 @@ function cgt() {
   return kbe || (kbe = 1, kQ = mslxRequest), kQ;
 }
 var ugt = cgt();
-const dgt = /* @__PURE__ */ z1(ugt), Yb = "/api/plugin/mslx-plugins-ai-agents/settings", Xh = "/api/plugin/mslx-plugins-ai-agents/settings/mcp/tokens", Agt = "/api/plugin/mslx-plugins-ai-agents/ai/chat", fgt = "/api/plugin/mslx-plugins-ai-agents/ai/confirm-tool", Obe = "/api/hubs/plugin/mslx-plugins-ai-agents/chat", pgt = "mslx-web-token", hgt = "mslx-base-url";
+const dgt = /* @__PURE__ */ z1(ugt), Yb = "/api/plugin/mslx-plugin-ai-agents/settings", Xh = "/api/plugin/mslx-plugin-ai-agents/settings/mcp/tokens", Agt = "/api/plugin/mslx-plugin-ai-agents/ai/chat", fgt = "/api/plugin/mslx-plugin-ai-agents/ai/confirm-tool", Obe = "/api/hubs/plugin/mslx-plugin-ai-agents/chat", pgt = "mslx-web-token", hgt = "mslx-base-url";
 function Pg() {
   try {
     const n = window.MSLX_NodeContext?.use?.();
@@ -135576,7 +135576,7 @@ async function ygt(n) {
   hT(r);
 }
 function _gt() {
-  const t = `${(bd() || (typeof window < "u" ? window.location.origin : "http://localhost:25333")).replace(/\/+$/, "")}/api/plugin/mslx-plugins-ai-agents/mcp`;
+  const t = `${(bd() || (typeof window < "u" ? window.location.origin : "http://localhost:25333")).replace(/\/+$/, "")}/api/plugin/mslx-plugin-ai-agents/mcp`;
   return {
     streamableHttpUrl: t,
     sseUrl: `${t}/sse`,

@@ -8,7 +8,7 @@ using MSLX.SDK.Models;
 namespace MSLX.Plugin.AiAgents.Controllers;
 
 [ApiController]
-[Route("api/plugin/mslx-plugins-ai-agents/ai")]
+[Route("api/plugin/mslx-plugin-ai-agents/ai")]
 public class AiAssistantController : ControllerBase
 {
     private readonly AiService _aiService;

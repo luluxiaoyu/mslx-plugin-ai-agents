@@ -56,7 +56,7 @@ public partial class AiService
         Func<string, object, Task> onToolExecuted,
         string userId = "")
     {
-        var configBridge = MSLX.SDK.MSLX.Config.GetPluginConfig("mslx-plugins-ai-agents");
+        var configBridge = MSLX.SDK.MSLX.Config.GetPluginConfig("mslx-plugin-ai-agents");
         var config = configBridge.ReadConfig();
         bool enabled = (bool?)(config["aiEnabled"]) ?? false;
         string apiKey = (string?)(config["aiApiKey"]) ?? "";

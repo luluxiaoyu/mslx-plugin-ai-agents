@@ -9,11 +9,11 @@ using MSLX.SDK.Models;
 namespace MSLX.Plugin.AiAgents.Controllers;
 
 [ApiController]
-[Route("api/plugin/mslx-plugins-ai-agents/settings")]
+[Route("api/plugin/mslx-plugin-ai-agents/settings")]
 public class AiSettingsController : ControllerBase
 {
     private static IPluginConfigBridge Config =>
-        MSLX.SDK.MSLX.Config.GetPluginConfig("mslx-plugins-ai-agents");
+        MSLX.SDK.MSLX.Config.GetPluginConfig("mslx-plugin-ai-agents");
 
     private readonly McpTokenManager _tokenManager;
 

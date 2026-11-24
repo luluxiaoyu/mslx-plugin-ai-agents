@@ -20,7 +20,7 @@ public class McpController(
     IConfiguration configuration,
     ILogger<McpController> logger) : ControllerBase
 {
-    private const string RoutePrefix = "api/plugin/mslx-plugins-ai-agents/mcp";
+    private const string RoutePrefix = "api/plugin/mslx-plugin-ai-agents/mcp";
     private const string LegacyProtocolVersion = "2024-11-05";
     private const string PreferredProtocolVersion = "2025-11-25";
     private const string ProtocolVersionHeader = "MCP-Protocol-Version";

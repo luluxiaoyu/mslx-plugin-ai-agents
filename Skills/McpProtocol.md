@@ -2,13 +2,13 @@
 
 ## Streamable HTTP
 
-将客户端的 MCP 服务地址设为 `http://localhost:25333/api/plugin/mslx-plugins-ai-agents/mcp`，传输选择 Streamable HTTP，并配置请求头 `Authorization: Bearer <MCP_TOKEN>`。把示例主机和端口替换为实际连接的 MSLX 地址。
+将客户端的 MCP 服务地址设为 `http://localhost:25333/api/plugin/mslx-plugin-ai-agents/mcp`，传输选择 Streamable HTTP，并配置请求头 `Authorization: Bearer <MCP_TOKEN>`。把示例主机和端口替换为实际连接的 MSLX 地址。
 
 ```json
 {
   "mcpServers": {
     "mslx": {
-      "url": "http://localhost:25333/api/plugin/mslx-plugins-ai-agents/mcp",
+      "url": "http://localhost:25333/api/plugin/mslx-plugin-ai-agents/mcp",
       "headers": {
         "Authorization": "Bearer <MCP_TOKEN>"
       }
@@ -35,9 +35,9 @@
 
 ## 旧版 HTTP + SSE
 
-协议版本为 `2024-11-05`。将仅支持 SSE 的客户端指向 `/api/plugin/mslx-plugins-ai-agents/mcp/sse`，并优先使用相同的 Bearer 请求头。仅支持 URL 参数的旧客户端可在 SSE 地址附加 `?token=<MCP_TOKEN>`。
+协议版本为 `2024-11-05`。将仅支持 SSE 的客户端指向 `/api/plugin/mslx-plugin-ai-agents/mcp/sse`，并优先使用相同的 Bearer 请求头。仅支持 URL 参数的旧客户端可在 SSE 地址附加 `?token=<MCP_TOKEN>`。
 
-SSE 建立后，首条 `endpoint` 事件提供实际的 POST 地址 `/api/plugin/mslx-plugins-ai-agents/mcp/message?sessionId=…`。客户端向该地址提交 JSON-RPC 消息，POST 返回空的 HTTP 202，结果通过同一 SSE 连接的 `message` 事件送达。会话随连接结束而失效。已有脚本可以继续携带令牌直接向 `/mcp/message` POST 并读取 JSON 响应。
+SSE 建立后，首条 `endpoint` 事件提供实际的 POST 地址 `/api/plugin/mslx-plugin-ai-agents/mcp/message?sessionId=…`。客户端向该地址提交 JSON-RPC 消息，POST 返回空的 HTTP 202，结果通过同一 SSE 连接的 `message` 事件送达。会话随连接结束而失效。已有脚本可以继续携带令牌直接向 `/mcp/message` POST 并读取 JSON 响应。
 
 ## 令牌与来源
 
@@ -45,4 +45,4 @@ SSE 建立后，首条 `endpoint` 事件提供实际的 POST 地址 `/api/plugin
 
 桌面客户端通常不发送 `Origin`。浏览器可以从与 MCP 地址同源的本地回环地址访问。对其他受信任的浏览器来源，在宿主配置的 `MslxMcp:AllowedOrigins` 数组加入完整 Origin，例如通过环境变量配置 `MslxMcp__AllowedOrigins__0=https://panel.example.com`。
 
-`GET /api/plugin/mslx-plugins-ai-agents/mcp/skill.md` 提供运维指南的 Markdown。客户端当前工具列表和参数以 `tools/list` 为准。
+`GET /api/plugin/mslx-plugin-ai-agents/mcp/skill.md` 提供运维指南的 Markdown。客户端当前工具列表和参数以 `tools/list` 为准。
