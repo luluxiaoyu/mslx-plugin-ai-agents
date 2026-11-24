@@ -159,9 +159,10 @@ let dragOffset = { x: 0, y: 0 };
 const startDrag = (e: MouseEvent) => {
   const target = e.target as HTMLElement;
   if (target.closest('.header-actions') || target.closest('.clear-btn') || target.closest('.t-button')) return;
+  const windowRect = target.closest('.floating-ai-card')?.getBoundingClientRect();
   isDragging = true;
-  dragOffset.x = e.clientX - floatPos.value.x;
-  dragOffset.y = e.clientY - floatPos.value.y;
+  dragOffset.x = e.clientX - (windowRect?.left ?? floatPos.value.x);
+  dragOffset.y = e.clientY - (windowRect?.top ?? floatPos.value.y);
   window.addEventListener('mousemove', onDrag);
   window.addEventListener('mouseup', stopDrag);
 };
@@ -654,19 +655,19 @@ onBeforeUnmount(() => {
       v-if="displayMode === 'drawer'"
       attach="body"
       :visible="visible"
-      size="560px"
+      :size="selectedMode === 'mcp' ? 'min(560px, 100vw)' : '560px'"
       :footer="false"
       :body-style="{ background: 'var(--td-bg-color-container)', height: 'calc(100% - 48px)', padding: selectedMode === 'apikey' ? '16px' : '0px' }"
       @close="handleClose"
     >
       <template #header>
-        <div class="drawer-header-row">
+        <div class="drawer-header-row" :class="{ 'mcp-window-header': selectedMode === 'mcp' }">
           <div class="drawer-title">
             <template v-if="!selectedMode">
               <span>MSLX AI 助手</span>
             </template>
             <template v-else-if="selectedMode === 'mcp'">
-              <span>MSLX AI 助手 (MCP 本地模式)</span>
+              <span>MCP 接入</span>
             </template>
             <template v-else>
               <span>MSLX AI 智能运维助手</span>
@@ -692,10 +693,13 @@ onBeforeUnmount(() => {
               清空历史
             </t-button>
             <t-tooltip content="切换至自由悬浮小窗">
-              <t-button variant="text" shape="square" size="small" class="mode-btn" @click="toggleDisplayMode">
-                <template #icon><desktop-icon class="mode-icon" /></template>
+              <t-button variant="text" shape="square" size="small" class="mode-btn" aria-label="切换至悬浮窗口" @click="toggleDisplayMode">
+                <template #icon><desktop-icon class="mode-icon" aria-hidden="true" /></template>
               </t-button>
             </t-tooltip>
+            <t-button v-if="selectedMode === 'mcp'" variant="text" shape="square" size="small" class="close-btn" aria-label="关闭 AI 助手" @click="handleClose">
+              <template #icon><close-icon aria-hidden="true" /></template>
+            </t-button>
           </div>
         </div>
       </template>
@@ -706,8 +710,8 @@ onBeforeUnmount(() => {
       </div>
 
       <!-- MCP 管理视图 -->
-      <div v-else-if="selectedMode === 'mcp'" class="h-full overflow-y-auto p-4">
-        <McpManagementView @switch-mode="handleSwitchToModeSelect" />
+      <div v-else-if="selectedMode === 'mcp'" class="mcp-window-body mcp-drawer-body">
+        <McpManagementView />
       </div>
 
       <!-- 统一的 AI 对话核心界面组件 (API Key 模式) -->
@@ -891,16 +895,19 @@ onBeforeUnmount(() => {
       <div
         v-if="visible && displayMode === 'floating'"
         class="floating-ai-card"
-        :style="{ left: `${floatPos.x}px`, top: `${floatPos.y}px` }"
+        :class="{ 'floating-mcp': selectedMode === 'mcp' }"
+        :style="selectedMode === 'mcp'
+          ? { '--mcp-float-x': `${floatPos.x}px`, '--mcp-float-y': `${floatPos.y}px` }
+          : { left: `${floatPos.x}px`, top: `${floatPos.y}px` }"
       >
-        <div class="floating-header" @mousedown="startDrag">
+        <div class="floating-header" :class="{ 'mcp-window-header': selectedMode === 'mcp' }" @mousedown="startDrag">
           <div class="drawer-title draggable-title">
             <move-icon class="drag-icon" />
             <template v-if="!selectedMode">
               <span>MSLX AI 助手</span>
             </template>
             <template v-else-if="selectedMode === 'mcp'">
-              <span>MSLX AI 助手 (MCP 本地模式)</span>
+              <span>MCP 接入</span>
             </template>
             <template v-else>
               <span>MSLX AI 智能运维助手</span>
@@ -926,12 +933,12 @@ onBeforeUnmount(() => {
               清空历史
             </t-button>
             <t-tooltip content="切换至侧边抽屉">
-              <t-button variant="text" shape="square" size="small" class="mode-btn" @click="toggleDisplayMode">
-                <template #icon><view-list-icon class="mode-icon" /></template>
+              <t-button variant="text" shape="square" size="small" class="mode-btn" aria-label="切换至侧边抽屉" @click="toggleDisplayMode">
+                <template #icon><view-list-icon class="mode-icon" aria-hidden="true" /></template>
               </t-button>
             </t-tooltip>
-            <t-button variant="text" shape="square" size="small" class="close-btn" @click="handleClose">
-              <template #icon><close-icon /></template>
+            <t-button variant="text" shape="square" size="small" class="close-btn" aria-label="关闭 AI 助手" @click="handleClose">
+              <template #icon><close-icon aria-hidden="true" /></template>
             </t-button>
           </div>
         </div>
@@ -943,8 +950,8 @@ onBeforeUnmount(() => {
           </div>
 
           <!-- MCP 管理视图 -->
-          <div v-else-if="selectedMode === 'mcp'" class="h-full overflow-y-auto p-4">
-            <McpManagementView @switch-mode="handleSwitchToModeSelect" />
+          <div v-else-if="selectedMode === 'mcp'" class="mcp-window-body">
+            <McpManagementView />
           </div>
 
           <!-- 统一的 AI 对话核心界面组件 (API Key 模式) -->
@@ -1242,6 +1249,73 @@ onBeforeUnmount(() => {
   flex-direction: column;
   overflow: hidden;
   background-color: var(--td-bg-color-container) !important;
+}
+
+.floating-mcp {
+  --mcp-window-width: min(540px, calc(100vw - 16px));
+  --mcp-window-height: min(660px, calc(100vh - 16px));
+  box-sizing: border-box;
+  width: var(--mcp-window-width);
+  height: var(--mcp-window-height);
+  left: clamp(8px, var(--mcp-float-x), calc(100vw - var(--mcp-window-width) - 8px));
+  top: clamp(8px, var(--mcp-float-y), calc(100vh - var(--mcp-window-height) - 8px));
+}
+
+@supports (height: 100dvh) {
+  .floating-mcp {
+    --mcp-window-height: min(660px, calc(100dvh - 16px));
+    top: clamp(8px, var(--mcp-float-y), calc(100dvh - var(--mcp-window-height) - 8px));
+  }
+}
+
+.floating-mcp .floating-body {
+  padding: 0;
+}
+
+.mcp-window-body {
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 0;
+  padding: 16px clamp(12px, 4vw, 22px);
+}
+
+.mcp-drawer-body {
+  padding: 2px 0 8px;
+}
+
+.floating-mcp .mcp-window-body {
+  overflow-y: auto;
+  overscroll-behavior-y: contain;
+}
+
+.mcp-window-header {
+  gap: 8px;
+  color: var(--td-text-color-primary);
+}
+
+.mcp-window-header .drawer-title {
+  font-weight: 600;
+}
+
+.drawer-header-row.mcp-window-header {
+  padding-right: 0;
+}
+
+.mcp-window-header .header-actions {
+  flex-shrink: 0;
+}
+
+@media (pointer: coarse) {
+  .mcp-window-header .mode-btn,
+  .mcp-window-header .close-btn,
+  .mcp-window-header .mode-switch-btn {
+    min-height: 44px;
+  }
+
+  .mcp-window-header .mode-btn,
+  .mcp-window-header .close-btn {
+    min-width: 44px;
+  }
 }
 
 .draggable-title {

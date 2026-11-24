@@ -87,26 +87,35 @@ export async function updateAiSettings(data: AiSettingsModel): Promise<any> {
   return json.data ?? json;
 }
 
-export async function getMcpTokens(): Promise<McpTokenModel[]> {
-  const http = getHttp();
-  if (http?.get) {
-    try {
-      const res = await http.get({ url: MCP_TOKENS_URL });
-      return res?.data ?? res ?? [];
-    } catch (e) {
-      console.warn('http.get failed for MCP tokens, falling back to fetch', e);
-    }
-  }
+async function fetchMcpSettings(url: string, method: 'GET' | 'POST' | 'DELETE', data?: CreateMcpTokenRequest) {
   const token = getToken();
-  const res = await fetch(`${getBaseUrl()}${MCP_TOKENS_URL}`, {
+  const res = await fetch(`${getBaseUrl()}${url}`, {
+    method,
     headers: {
       'Content-Type': 'application/json',
       'x-user-token': token,
       Authorization: token ? `Bearer ${token}` : '',
     },
+    body: data ? JSON.stringify(data) : undefined,
   });
-  const json = await res.json();
-  return json.data ?? json ?? [];
+  const json = await res.json().catch(() => null);
+  if (!res.ok || !json) throw new Error(json?.message || `令牌请求失败（HTTP ${res.status}）`);
+  return json;
+}
+
+function unwrapMcpSettings(result: any) {
+  if (typeof result?.code === 'number' && result.code !== 200) {
+    throw new Error(result.message || '令牌请求失败');
+  }
+  return result?.data ?? result;
+}
+
+export async function getMcpTokens(): Promise<McpTokenModel[]> {
+  const http = getHttp();
+  const res = http?.get
+    ? await http.get({ url: MCP_TOKENS_URL })
+    : await fetchMcpSettings(MCP_TOKENS_URL, 'GET');
+  return unwrapMcpSettings(res);
 }
 
 export async function createMcpToken(data: CreateMcpTokenRequest): Promise<McpTokenModel> {
@@ -116,50 +125,19 @@ export async function createMcpToken(data: CreateMcpTokenRequest): Promise<McpTo
     expireDays: data.expireDays ?? data.expiresInDays,
     expiresInDays: data.expiresInDays ?? data.expireDays,
   };
-  if (http?.post) {
-    try {
-      const res = await http.post({ url: MCP_TOKENS_URL, data: payload });
-      return res?.data ?? res;
-    } catch (e) {
-      console.warn('http.post failed for create MCP token, falling back to fetch', e);
-    }
-  }
-  const token = getToken();
-  const res = await fetch(`${getBaseUrl()}${MCP_TOKENS_URL}`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'x-user-token': token,
-      Authorization: token ? `Bearer ${token}` : '',
-    },
-    body: JSON.stringify(payload),
-  });
-  const json = await res.json();
-  return json.data ?? json;
+  const res = http?.post
+    ? await http.post({ url: MCP_TOKENS_URL, data: payload })
+    : await fetchMcpSettings(MCP_TOKENS_URL, 'POST', payload);
+  return unwrapMcpSettings(res);
 }
 
-export async function revokeMcpToken(id: string): Promise<any> {
+export async function revokeMcpToken(id: string): Promise<void> {
   const http = getHttp();
   const url = `${MCP_TOKENS_URL}/${encodeURIComponent(id)}`;
-  if (http?.delete) {
-    try {
-      const res = await http.delete({ url });
-      return res?.data ?? res;
-    } catch (e) {
-      console.warn('http.delete failed for revoke MCP token, falling back to fetch', e);
-    }
-  }
-  const token = getToken();
-  const res = await fetch(`${getBaseUrl()}${url}`, {
-    method: 'DELETE',
-    headers: {
-      'Content-Type': 'application/json',
-      'x-user-token': token,
-      Authorization: token ? `Bearer ${token}` : '',
-    },
-  });
-  const json = await res.json();
-  return json.data ?? json;
+  const res = http?.delete
+    ? await http.delete({ url })
+    : await fetchMcpSettings(url, 'DELETE');
+  unwrapMcpSettings(res);
 }
 
 export function getMcpEndpointUrls() {

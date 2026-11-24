@@ -1,494 +1,964 @@
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue';
+import { computed, nextTick, onMounted, ref } from 'vue';
 import { MessagePlugin } from 'tdesign-vue-next';
+import { AddIcon, BrowseIcon, CopyIcon, RefreshIcon } from 'tdesign-icons-vue-next';
 import {
-  AddIcon,
-  CopyIcon,
-  BrowseIcon,
-  RefreshIcon,
-  SwapIcon,
-} from 'tdesign-icons-vue-next';
-import {
-  getMcpTokens,
   createMcpToken,
-  revokeMcpToken,
   getMcpEndpointUrls,
+  getMcpTokens,
+  revokeMcpToken,
   type McpTokenModel,
 } from '../api/aiApi';
 
-const emit = defineEmits<{
-  (e: 'switchMode'): void;
-}>();
-
-// ================= 端点信息 =================
-const mcpUrls = computed(() => getMcpEndpointUrls());
-
-// ================= 令牌数据 =================
-const tokensLoading = ref(false);
-const tokenList = ref<McpTokenModel[]>([]);
-const selectedTokenId = ref<string>('');
-
-// 新建令牌弹窗
-const createTokenModalVisible = ref(false);
-const createTokenSubmitting = ref(false);
-const tokenForm = ref<{ name: string; expireDays: number }>({
-  name: '',
-  expireDays: 30,
-});
-
-// 令牌创建成功明文弹窗
-const createdTokenDialogVisible = ref(false);
-const newlyCreatedToken = ref<McpTokenModel | null>(null);
-
-// 表格列定义 (遵循 TDesign 标准)
-const columns = [
-  { colKey: 'name', title: '名称 / 备注', width: 140 },
-  { colKey: 'token', title: '令牌标识', minWidth: 180 },
-  { colKey: 'expiresAt', title: '有效期 / 到期', width: 150 },
-  { colKey: 'status', title: '状态', width: 90 },
-  { colKey: 'action', title: '操作', width: 90, align: 'center' },
+const endpoints = getMcpEndpointUrls();
+const transport = ref<'http' | 'sse'>('http');
+const endpoint = computed(() => transport.value === 'http' ? endpoints.streamableHttpUrl : endpoints.sseUrl);
+const transportLabel = computed(() => transport.value === 'http' ? 'Streamable HTTP' : 'SSE');
+const clients = [
+  { name: '腾讯 WorkBuddy', url: 'https://www.codebuddy.cn/work/' },
+  { name: 'Qoder', url: 'https://qoder.cn/download' },
+  { name: '豆包电脑版', url: 'https://www.doubao.com/download/desktop' },
 ];
+const presetText = '请帮我连上 MSLX。连好后，告诉我有哪些 Minecraft 服务器。先只查看，别改任何设置。';
 
-const loadTokens = async () => {
+const tokens = ref<McpTokenModel[]>([]);
+const tokensLoading = ref(true);
+const loadError = ref('');
+const selectedTokenId = ref('');
+const dateTime = new Intl.DateTimeFormat('zh-CN', { dateStyle: 'medium', timeStyle: 'short' });
+
+const tokenStatus = (token: McpTokenModel) => {
+  if (token.isRevoked) return { label: '已吊销', theme: 'danger' } as const;
+  if (token.expiresAt && Date.parse(token.expiresAt) <= Date.now()) {
+    return { label: '已过期', theme: 'warning' } as const;
+  }
+  return { label: '有效', theme: 'success' } as const;
+};
+
+const usableTokens = computed(() => tokens.value.filter((token) => token.token && tokenStatus(token).theme === 'success'));
+const selectedToken = computed(() => usableTokens.value.find((token) => token.id === selectedTokenId.value));
+const maskedToken = (token: McpTokenModel) => token.maskedToken || (token.token.length > 12
+  ? `${token.token.slice(0, 8)}…${token.token.slice(-4)}`
+  : '••••••••');
+
+function formatExpiration(expiresAt: string | null) {
+  if (!expiresAt) return '永久有效';
+  const timestamp = Date.parse(expiresAt);
+  return Number.isFinite(timestamp) ? `${dateTime.format(timestamp)} 到期` : '到期时间未知';
+}
+
+function selectUsableToken() {
+  if (!selectedToken.value) selectedTokenId.value = usableTokens.value[0]?.id ?? '';
+}
+
+async function loadTokens() {
   tokensLoading.value = true;
+  loadError.value = '';
   try {
-    const res = await getMcpTokens();
-    tokenList.value = Array.isArray(res) ? res : [];
-    // 默认选中第一个有效令牌
-    if (!selectedTokenId.value && tokenList.value.length > 0) {
-      const active = tokenList.value.find((t) => !t.isRevoked && !isExpired(t.expiresAt));
-      selectedTokenId.value = active ? active.id : tokenList.value[0].id;
-    }
-  } catch (err: any) {
-    MessagePlugin.error(`获取 MCP 令牌失败: ${err.message || err}`);
+    const result = await getMcpTokens();
+    if (!Array.isArray(result)) throw new Error('令牌列表响应无效');
+    tokens.value = result;
+    selectUsableToken();
+  } catch (error) {
+    loadError.value = error instanceof Error ? error.message : '获取令牌失败';
   } finally {
     tokensLoading.value = false;
   }
-};
+}
 
-const isExpired = (expiresAt?: string | null) => {
-  if (!expiresAt) return false;
-  return new Date(expiresAt).getTime() < Date.now();
-};
+function buildPrompt(token: string) {
+  return `${presetText}
 
-// 当前选中的完整令牌字符串 (用于复制和配置文件填充)
-const currentSelectedTokenStr = computed(() => {
-  if (!selectedTokenId.value) return '';
-  const item = tokenList.value.find((t) => t.id === selectedTokenId.value);
-  return item ? item.token : '';
-});
+MCP 连接方式：${transportLabel.value}
+服务地址：${endpoint.value}
+请求头：Authorization: Bearer ${token}
+运维指南：${endpoints.skillMdUrl}
 
-// 令牌选择下拉选项
-const tokenSelectOptions = computed(() =>
-  tokenList.value.map((item) => ({
-    label: `${item.name} (${item.maskedToken || (item.token.length > 14 ? `${item.token.slice(0, 10)}...${item.token.slice(-4)}` : item.token)})`,
-    value: item.id,
-    disabled: item.isRevoked || isExpired(item.expiresAt),
-  }))
-);
+如果你不能直接连接这个服务，请告诉我该在哪里添加，以及下一步怎么做。`;
+}
 
-// ================= 复制文本工具 =================
-const copyText = async (text: string, label: string) => {
-  try {
-    if (navigator.clipboard && navigator.clipboard.writeText) {
-      await navigator.clipboard.writeText(text);
-    } else {
-      const textarea = document.createElement('textarea');
-      textarea.value = text;
-      document.body.appendChild(textarea);
-      textarea.select();
-      document.execCommand('copy');
-      document.body.removeChild(textarea);
-    }
-    MessagePlugin.success(`${label}已复制至剪贴板`);
-  } catch {
-    MessagePlugin.error('复制失败，请手动选中文本复制');
-  }
-};
-
-// ================= 1. 一句话接入模式预设文本 =================
-const oneSentencePrompt = computed(() => {
-  const token = currentSelectedTokenStr.value || 'YOUR_MCP_TOKEN';
-  const skillUrl = mcpUrls.value.skillMdUrl;
-
-  return `你是一个专业的 MSLX Minecraft 服务器智能运维助手。你将通过本地 MCP (Model Context Protocol) 接口协助管理员管理服务器。
-
-【服务接入信息】
-- Streamable HTTP：${mcpUrls.value.streamableHttpUrl}
-- 旧版 SSE：${mcpUrls.value.sseUrl}
-- 运维规范与工具字典：${skillUrl}
-
-【访问令牌】
-在 HTTP 请求头中附加 "Authorization: Bearer ${token}"。
-
-【使用指导】
-请直接参考上述 Skill 规范 (${skillUrl}) 中的运维指南与工具字典，通过上述 MCP 端点调取工具来执行所有 Minecraft 服务器运维操作。`;
-});
-
-// ================= 3. 标准 MCP JSON 通用配置 =================
-const standardMcpConfig = computed(() => {
-  const token = currentSelectedTokenStr.value || 'YOUR_MCP_TOKEN';
-  return JSON.stringify(
-    {
-      mcpServers: {
-        'mslx-server-ops': {
-          url: mcpUrls.value.streamableHttpUrl,
-          headers: {
-            Authorization: `Bearer ${token}`,
-          },
-        },
+function buildConfig(token: string) {
+  return JSON.stringify({
+    mcpServers: {
+      'mslx-server-ops': {
+        url: endpoint.value,
+        headers: { Authorization: `Bearer ${token}` },
       },
     },
-    null,
-    2
-  );
-});
+  }, null, 2);
+}
 
-// ================= 令牌创建与吊销 =================
-const openCreateTokenModal = () => {
-  tokenForm.value = {
-    name: '',
-    expireDays: 30,
-  };
-  createTokenModalVisible.value = true;
-};
+const configPreview = computed(() => buildConfig(selectedToken.value ? maskedToken(selectedToken.value) : 'YOUR_MCP_TOKEN'));
 
-const handleCreateToken = async () => {
-  if (!tokenForm.value.name.trim()) {
-    MessagePlugin.warning('请输入令牌备注名称');
+async function copyText(text: string, label: string) {
+  if (!text) return false;
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+    } else {
+      const previousFocus = document.activeElement;
+      const field = document.createElement('textarea');
+      field.value = text;
+      field.readOnly = true;
+      field.style.cssText = 'position: fixed; inset: 0 auto auto 0; opacity: 0;';
+      document.body.append(field);
+      try {
+        field.select();
+        if (!document.execCommand('copy')) throw new Error('Clipboard unavailable');
+      } finally {
+        field.remove();
+        if (previousFocus instanceof HTMLElement) previousFocus.focus({ preventScroll: true });
+      }
+    }
+    MessagePlugin.success(`已复制${label}`);
+    return true;
+  } catch {
+    MessagePlugin.error('复制失败，请检查浏览器的剪贴板权限后重试');
+    return false;
+  }
+}
+
+function getCurrentToken() {
+  const token = selectedToken.value;
+  if (token && tokenStatus(token).theme !== 'success') {
+    selectedTokenId.value = '';
+    tokens.value = [...tokens.value];
+    selectUsableToken();
+    MessagePlugin.warning('连接钥匙已过期，请再点一次按钮');
+    return null;
+  }
+  return token;
+}
+
+function copyConfig() {
+  const token = getCurrentToken();
+  if (token !== null) return copyText(buildConfig(token?.token || 'YOUR_MCP_TOKEN'), ' JSON 配置');
+}
+
+const createOpen = ref(false);
+const creating = ref(false);
+const quickError = ref('');
+const promptCopied = ref(false);
+const createdToken = ref<McpTokenModel | null>(null);
+const nameInput = ref<HTMLInputElement | null>(null);
+const createHeading = ref<HTMLElement | null>(null);
+const revokeHeading = ref<HTMLElement | null>(null);
+const tokensHeading = ref<HTMLElement | null>(null);
+const name = ref('');
+const expireDays = ref(30);
+const nameError = ref('');
+const createError = ref('');
+
+async function addToken(name: string, expireDays: number) {
+  const token = await createMcpToken({ name, expireDays });
+  if (!token?.id || !token.token) throw new Error('没有收到连接钥匙，请刷新后重试');
+  tokens.value = [token, ...tokens.value.filter((item) => item.id !== token.id)];
+  selectedTokenId.value = token.id;
+  return token;
+}
+
+async function handleQuickConnect() {
+  if (tokensLoading.value || creating.value) return;
+  quickError.value = '';
+  promptCopied.value = false;
+  const token = getCurrentToken();
+  if (token === null) return;
+
+  if (token) {
+    promptCopied.value = await copyText(buildPrompt(token.token), '这段话');
     return;
   }
-  createTokenSubmitting.value = true;
-  try {
-    const res = await createMcpToken({
-      name: tokenForm.value.name.trim(),
-      expireDays: tokenForm.value.expireDays,
-    });
-    createTokenModalVisible.value = false;
-    newlyCreatedToken.value = res;
-    if (res?.id) {
-      selectedTokenId.value = res.id;
-    }
-    createdTokenDialogVisible.value = true;
-    MessagePlugin.success('访问令牌生成成功');
+
+  if (loadError.value) {
     await loadTokens();
-  } catch (err: any) {
-    MessagePlugin.error(`创建失败: ${err.message || err}`);
+    return;
+  }
+
+  creating.value = true;
+  try {
+    await addToken('AI 助手接入', 30);
+    MessagePlugin.success('钥匙准备好了，现在可以复制这段话');
+  } catch {
+    quickError.value = '钥匙没生成成功，请再试一次。';
   } finally {
-    createTokenSubmitting.value = false;
+    creating.value = false;
   }
-};
+}
 
-const handleRevokeToken = async (item: McpTokenModel) => {
+let dialogTrigger: HTMLElement | null = null;
+
+function restoreDialogFocus() {
+  const target = dialogTrigger?.isConnected ? dialogTrigger : tokensHeading.value;
+  target?.focus({ preventScroll: true });
+  dialogTrigger = null;
+}
+
+function keepDialogFocus(event: KeyboardEvent) {
+  if (!(event.currentTarget instanceof HTMLElement)) return;
+  const controls = Array.from(event.currentTarget.querySelectorAll<HTMLElement>(
+    'button:not([disabled]), input:not([disabled]), select:not([disabled]), a[href]',
+  )).filter((element) => element.tabIndex >= 0 && element.getClientRects().length > 0);
+  const focused = controls.indexOf(document.activeElement as HTMLElement);
+  const boundary = event.shiftKey ? 0 : controls.length - 1;
+  if (focused === -1 || focused === boundary) {
+    event.preventDefault();
+    (event.shiftKey ? controls.at(-1) : controls[0])?.focus();
+  }
+}
+
+function openCreate(event: MouseEvent) {
+  dialogTrigger = event.currentTarget as HTMLElement;
+  name.value = '';
+  expireDays.value = 30;
+  nameError.value = '';
+  createError.value = '';
+  createdToken.value = null;
+  createOpen.value = true;
+}
+
+async function createToken() {
+  if (creating.value || createdToken.value) return;
+  const trimmedName = name.value.trim();
+  if (!trimmedName) {
+    nameError.value = '请输入令牌名称';
+    await nextTick();
+    nameInput.value?.focus();
+    return;
+  }
+
+  creating.value = true;
+  createError.value = '';
   try {
-    await revokeMcpToken(item.id);
-    MessagePlugin.success(`已吊销令牌: ${item.name}`);
-    await loadTokens();
-  } catch (err: any) {
-    MessagePlugin.error(`吊销失败: ${err.message || err}`);
+    createdToken.value = await addToken(trimmedName, expireDays.value);
+    await nextTick();
+    createHeading.value?.focus();
+  } catch (error) {
+    createError.value = error instanceof Error ? error.message : '创建失败，请重试';
+  } finally {
+    creating.value = false;
   }
-};
+}
 
-const previewSkillMd = () => {
-  window.open(mcpUrls.value.skillMdUrl, '_blank');
-};
+const revokeOpen = ref(false);
+const revokeTarget = ref<McpTokenModel | null>(null);
+const revoking = ref(false);
+const revokeError = ref('');
 
-onMounted(() => {
-  loadTokens();
-});
+function openRevoke(token: McpTokenModel, event: MouseEvent) {
+  dialogTrigger = event.currentTarget as HTMLElement;
+  revokeTarget.value = token;
+  revokeError.value = '';
+  revokeOpen.value = true;
+}
+
+async function revokeToken() {
+  const token = revokeTarget.value;
+  if (!token || revoking.value) return;
+
+  revoking.value = true;
+  revokeError.value = '';
+  try {
+    await revokeMcpToken(token.id);
+    tokens.value = tokens.value.map((item) => item.id === token.id ? { ...item, isRevoked: true } : item);
+    selectUsableToken();
+    revokeOpen.value = false;
+    MessagePlugin.success(`已吊销令牌“${token.name}”`);
+  } catch (error) {
+    revokeError.value = error instanceof Error ? error.message : '吊销失败，请重试';
+  } finally {
+    revoking.value = false;
+  }
+}
+
+onMounted(loadTokens);
 </script>
 
 <template>
-  <div class="mcp-management-view space-y-6 pb-6">
-    <!-- 顶部状态栏与切换模式入口 -->
-    <div class="flex items-center justify-between p-3.5 rounded-xl border border-[var(--td-component-border)] bg-[var(--td-bg-color-container)]">
-      <div class="flex items-center gap-2.5">
-        <div class="w-2.5 h-2.5 rounded-full bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.5)]"></div>
-        <div>
-          <span class="text-xs font-bold text-[var(--td-text-color-primary)]">MCP 本地服务就绪</span>
-          <span class="text-[11px] text-[var(--td-text-color-secondary)] ml-2">复用宿主端口，无额外网络占用</span>
-        </div>
+  <div class="mcp-management">
+    <section class="mcp-section" aria-labelledby="mcp-quick-heading">
+      <div class="section-header">
+        <h2 id="mcp-quick-heading">让 AI 帮你查看服务器</h2>
       </div>
-      <div class="flex items-center gap-2">
-        <t-button variant="outline" size="small" @click="emit('switchMode')">
-          <template #icon><swap-icon /></template>
-          切换工作模式
-        </t-button>
-        <t-button variant="text" size="small" shape="square" @click="loadTokens">
-          <template #icon><refresh-icon /></template>
-        </t-button>
-      </div>
-    </div>
-
-    <!-- 1. 一句话接入模式 (最上方) -->
-    <div class="design-card rounded-xl border border-[var(--td-component-border)] bg-[var(--td-bg-color-container)] p-4 sm:p-5">
-      <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-[var(--td-component-border)]">
-        <div>
-          <h3 class="text-sm font-bold text-[var(--td-text-color-primary)] m-0">
-            一句话接入模式
-          </h3>
-          <p class="text-xs text-[var(--td-text-color-secondary)] mt-1 mb-0 leading-relaxed">
-            适用于豆包、Workbuddy、各类本地智能体或纯提示词 AI。已将 MCP 端点、Skill 规范与访问令牌整合成标准预设指令，直接复制粘贴至客户端即可。
+      <ol class="quick-steps">
+        <li>
+          <h3>打开你常用的 AI 工具</h3>
+          <p>已经装好了就直接打开。还没装，点下面任选一个下载。</p>
+          <div class="client-links">
+            <a
+              v-for="client in clients"
+              :key="client.name"
+              class="client-link"
+              :href="client.url"
+              target="_blank"
+              rel="noopener noreferrer"
+              :aria-label="`在新标签页下载${client.name}`"
+            >
+              {{ client.name }} <span aria-hidden="true">↗</span>
+            </a>
+          </div>
+        </li>
+        <li>
+          <h3>复制这段话</h3>
+          <div class="preset">
+            <p>{{ presetText }}</p>
+            <t-button theme="primary" :loading="tokensLoading || creating" @click="handleQuickConnect">
+              <template #icon>
+                <CopyIcon v-if="selectedToken" aria-hidden="true" />
+                <AddIcon v-else-if="!loadError" aria-hidden="true" />
+                <RefreshIcon v-else aria-hidden="true" />
+              </template>
+              {{ tokensLoading ? '正在准备…' : selectedToken ? '复制这段话' : loadError ? '重新加载' : '先生成连接钥匙' }}
+            </t-button>
+          </div>
+          <p v-if="quickError" class="field-error" role="alert">{{ quickError }}</p>
+          <p v-else-if="!tokensLoading && !selectedToken">
+            {{ loadError ? '连接钥匙没加载出来，请点「重新加载」。' : '第一次使用先点按钮生成钥匙，然后再复制。' }}
           </p>
-        </div>
+        </li>
+        <li>
+          <h3>粘贴到聊天框，再点发送</h3>
+          <p role="status">{{ promptCopied ? '已复制，去你自己的 AI 对话里粘贴吧。' : '用你自己的 AI 对话发送，等它告诉你有没有连上。' }}</p>
+        </li>
+      </ol>
+    </section>
 
-        <div class="flex items-center gap-2 shrink-0">
-          <t-button theme="primary" size="small" @click="copyText(oneSentencePrompt, '一句话接入预设指令')">
-            <template #icon><copy-icon /></template>
-            一键复制预设指令
+    <details class="advanced-settings">
+      <summary>高级设置</summary>
+      <div class="advanced-content">
+        <section class="mcp-section" aria-labelledby="mcp-connection-heading">
+          <div class="section-header">
+            <div>
+              <h2 id="mcp-connection-heading">客户端配置</h2>
+              <p>为外部 Agent 生成可复制的连接配置。</p>
+            </div>
+            <a class="guide-link" :href="endpoints.skillMdUrl" target="_blank" rel="noopener noreferrer" aria-label="在新标签页打开运维指南">
+              <BrowseIcon aria-hidden="true" />
+              运维指南
+            </a>
+          </div>
+
+          <div class="connection-panel">
+            <div class="connection-fields">
+              <label class="mcp-field">
+                <span>传输协议</span>
+                <select v-model="transport" class="mcp-control" name="mcp-transport">
+                  <option value="http">Streamable HTTP</option>
+                  <option value="sse">SSE（旧版客户端）</option>
+                </select>
+              </label>
+              <label class="mcp-field">
+                <span>访问令牌</span>
+                <select v-model="selectedTokenId" class="mcp-control" name="mcp-token" :disabled="!usableTokens.length">
+                  <option v-if="!usableTokens.length" value="">{{ tokensLoading ? '加载中…' : '暂无可用令牌' }}</option>
+                  <option v-for="token in usableTokens" :key="token.id" :value="token.id">{{ token.name }} · {{ maskedToken(token).slice(-4) }}</option>
+                </select>
+              </label>
+            </div>
+
+            <div class="endpoint-row">
+              <code translate="no">{{ endpoint }}</code>
+              <t-button variant="text" shape="square" aria-label="复制服务地址" title="复制服务地址" @click="copyText(endpoint, '服务地址')">
+                <template #icon><CopyIcon aria-hidden="true" /></template>
+              </t-button>
+            </div>
+
+            <div class="preview">
+              <div class="preview-toolbar">
+                <span>JSON 配置</span>
+                <t-button theme="primary" size="small" :disabled="tokensLoading" @click="copyConfig">
+                  <template #icon><CopyIcon aria-hidden="true" /></template>
+                  复制 JSON
+                </t-button>
+              </div>
+              <details class="preview-details">
+                <summary>预览配置</summary>
+                <pre class="config-code" translate="no"><code>{{ configPreview }}</code></pre>
+              </details>
+            </div>
+
+            <p v-if="!tokensLoading" class="config-note">
+              {{ selectedToken ? '预览中隐藏令牌，复制时填入完整值。' : '创建有效令牌后，复制的配置会自动填入令牌。' }}
+            </p>
+          </div>
+        </section>
+
+        <section class="mcp-section" aria-labelledby="mcp-tokens-heading">
+          <div class="section-header">
+            <div>
+              <h2 id="mcp-tokens-heading" ref="tokensHeading" tabindex="-1">访问令牌</h2>
+              <p>{{ tokensLoading ? '加载中…' : `${usableTokens.length} 个可用 · 共 ${tokens.length} 个` }}</p>
+            </div>
+            <div class="section-actions">
+              <t-button
+                variant="outline"
+                shape="square"
+                :loading="tokensLoading"
+                aria-label="刷新令牌"
+                title="刷新令牌"
+                @click="loadTokens"
+              >
+                <template #icon><RefreshIcon aria-hidden="true" /></template>
+              </t-button>
+              <t-button variant="outline" theme="primary" :disabled="tokensLoading || creating" @click="openCreate">
+                <template #icon><AddIcon aria-hidden="true" /></template>
+                新建令牌
+              </t-button>
+            </div>
+          </div>
+
+          <p v-if="loadError" class="empty-state" role="alert">加载失败。{{ loadError }}。请刷新重试。</p>
+          <p v-else-if="!tokens.length" class="empty-state" role="status">
+            {{ tokensLoading ? '正在读取令牌…' : '还没有访问令牌。新建一个令牌即可配置客户端。' }}
+          </p>
+          <ul v-if="tokens.length" class="token-list" :aria-busy="tokensLoading">
+            <li v-for="token in tokens" :key="token.id" class="token-row">
+              <div class="token-details">
+                <div class="token-heading">
+                  <span class="token-name">{{ token.name }}</span>
+                  <t-tag :theme="tokenStatus(token).theme" variant="light" size="small">{{ tokenStatus(token).label }}</t-tag>
+                </div>
+                <div class="token-meta">
+                  <code translate="no">{{ maskedToken(token) }}</code>
+                  <span>{{ formatExpiration(token.expiresAt) }}</span>
+                </div>
+              </div>
+              <div v-if="!token.isRevoked" class="token-actions">
+                <t-button
+                  v-if="token.token && tokenStatus(token).theme === 'success'"
+                  variant="text"
+                  size="small"
+                  :aria-label="`复制令牌 ${token.name}`"
+                  @click="copyText(token.token, '令牌')"
+                >
+                  复制
+                </t-button>
+                <t-button
+                  variant="text"
+                  size="small"
+                  theme="danger"
+                  :disabled="tokensLoading"
+                  :aria-label="`吊销令牌 ${token.name}`"
+                  @click="openRevoke(token, $event)"
+                >
+                  吊销
+                </t-button>
+              </div>
+            </li>
+          </ul>
+        </section>
+      </div>
+    </details>
+
+    <t-dialog
+      v-model:visible="createOpen"
+      attach="body"
+      width="min(440px, 92vw)"
+      class="mcp-token-dialog"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="mcp-create-title"
+      :close-on-overlay-click="false"
+      :close-on-esc-keydown="!creating"
+      :close-btn="false"
+      :confirm-btn="createdToken ? '完成' : { content: '创建令牌', loading: creating }"
+      :cancel-btn="createdToken || creating ? null : '取消'"
+      @keydown.tab="keepDialogFocus"
+      @opened="createHeading?.focus()"
+      @confirm="createdToken ? createOpen = false : createToken()"
+      @closed="createdToken = null; restoreDialogFocus()"
+    >
+      <template #header>
+        <h2 id="mcp-create-title" ref="createHeading" class="mcp-dialog-title" tabindex="-1">
+          {{ createdToken ? '令牌已创建' : '新建访问令牌' }}
+        </h2>
+      </template>
+      <div v-if="createdToken" class="mcp-dialog-content">
+        <p>已选用“{{ createdToken.name }}”。在客户端配置中复制时会带上这个令牌。</p>
+        <div class="created-token">
+          <code translate="no">{{ createdToken.token }}</code>
+          <t-button variant="outline" size="small" @click="copyText(createdToken.token, '令牌')">
+            <template #icon><CopyIcon aria-hidden="true" /></template>
+            复制令牌
           </t-button>
         </div>
       </div>
-
-      <!-- 令牌选择关联 -->
-      <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-2 mt-3.5 mb-2">
-        <div class="text-xs text-[var(--td-text-color-secondary)] flex items-center gap-2">
-          <span>带入的访问令牌:</span>
-          <t-select
-            v-if="tokenList.length > 0"
-            v-model="selectedTokenId"
-            :options="tokenSelectOptions"
-            size="small"
-            style="width: 260px"
-            placeholder="选择带入的访问令牌"
-          />
-          <span v-else class="text-amber-500 font-medium text-xs">
-            暂无有效令牌，请在下方创建
-          </span>
-        </div>
-        <span class="text-[11px] text-[var(--td-text-color-placeholder)]">
-          复制后直接粘贴到客户端的系统人设或对话输入框
-        </span>
-      </div>
-
-      <!-- 预设指令预览 -->
-      <div class="relative bg-[#1e1e1e] dark:bg-[#141414] text-[#d4d4d4] rounded-xl p-3.5 font-mono text-xs overflow-x-auto max-h-[200px] shadow-inner border border-[var(--td-component-border)] select-all leading-relaxed whitespace-pre-wrap">
-        {{ oneSentencePrompt }}
-      </div>
-    </div>
-
-    <!-- 2. 访问令牌管理 (中间) -->
-    <div class="design-card rounded-xl border border-[var(--td-component-border)] bg-[var(--td-bg-color-container)] p-4 sm:p-5">
-      <div class="flex items-center justify-between pb-3 border-b border-[var(--td-component-border)]">
-        <div>
-          <h3 class="text-sm font-bold text-[var(--td-text-color-primary)] m-0">
-            访问令牌管理
-          </h3>
-          <p class="text-xs text-[var(--td-text-color-secondary)] mt-1 mb-0">
-            MCP 接口使用独立的访问令牌进行安全鉴权，不依赖宿主登录状态。支持按需设置有效期或随时吊销。
-          </p>
-        </div>
-        <t-button theme="primary" size="small" @click="openCreateTokenModal">
-          <template #icon><add-icon /></template>
-          新建令牌
-        </t-button>
-      </div>
-
-      <!-- 令牌列表表格 (标准 TDesign Table) -->
-      <div class="mt-4">
-        <t-table
-          :data="tokenList"
-          :columns="columns"
-          :loading="tokensLoading"
-          row-key="id"
-          size="small"
-          hover
-          :empty="tokensLoading ? '正在加载令牌...' : '暂无 MCP 访问令牌，请点击右上角新建'"
-        >
-          <template #name="{ row }">
-            <span class="font-bold text-xs text-[var(--td-text-color-primary)]">{{ row.name }}</span>
-          </template>
-
-          <template #token="{ row }">
-            <div class="flex items-center gap-1.5">
-              <code class="text-xs bg-[var(--td-bg-color-secondarycontainer)] px-1.5 py-0.5 rounded text-[var(--td-text-color-secondary)] font-mono">
-                {{ row.maskedToken || row.token }}
-              </code>
-              <t-tooltip content="复制完整令牌">
-                <t-button variant="text" shape="square" size="small" @click="copyText(row.token, '完整访问令牌')">
-                  <template #icon><copy-icon /></template>
-                </t-button>
-              </t-tooltip>
-            </div>
-          </template>
-
-          <template #expiresAt="{ row }">
-            <span v-if="!row.expiresAt" class="text-xs text-[var(--td-text-color-secondary)]">永久有效</span>
-            <span v-else-if="isExpired(row.expiresAt)" class="text-xs text-rose-500">已过期</span>
-            <span v-else class="text-xs text-[var(--td-text-color-secondary)]">{{ row.expiresAt }}</span>
-          </template>
-
-          <template #status="{ row }">
-            <t-tag v-if="row.isRevoked" theme="danger" variant="light" size="small">已吊销</t-tag>
-            <t-tag v-else-if="isExpired(row.expiresAt)" theme="warning" variant="light" size="small">已过期</t-tag>
-            <t-tag v-else theme="success" variant="light" size="small">有效</t-tag>
-          </template>
-
-          <template #action="{ row }">
-            <t-popconfirm
-              v-if="!row.isRevoked"
-              content="确定要吊销此令牌吗？吊销后使用该令牌的 Agent 将无法再调用 MCP 接口。"
-              theme="danger"
-              @confirm="handleRevokeToken(row)"
-            >
-              <t-button variant="text" theme="danger" size="small">吊销</t-button>
-            </t-popconfirm>
-            <span v-else class="text-xs text-[var(--td-text-color-placeholder)]">-</span>
-          </template>
-        </t-table>
-      </div>
-    </div>
-
-    <!-- 3. 标准接口配置 (最下方) -->
-    <div class="design-card rounded-xl border border-[var(--td-component-border)] bg-[var(--td-bg-color-container)] p-4 sm:p-5">
-      <div class="pb-3 border-b border-[var(--td-component-border)]">
-        <h3 class="text-sm font-bold text-[var(--td-text-color-primary)] m-0">
-          标准接口配置
-        </h3>
-        <p class="text-xs text-[var(--td-text-color-secondary)] mt-1 mb-0">
-          适用于支持标准 MCP 协议客户端的通用接口地址与配置规范。
-        </p>
-      </div>
-
-      <div class="mt-4 space-y-4">
-        <!-- 端点列表 -->
-        <div class="grid grid-cols-1 gap-2.5">
-          <!-- Streamable HTTP 端点 -->
-          <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-2 p-2.5 rounded-lg bg-[var(--td-bg-color-secondarycontainer)] border border-[var(--td-component-border)]">
-            <div class="min-w-0">
-              <div class="text-[11px] font-bold text-[var(--td-text-color-secondary)]">Streamable HTTP</div>
-              <div class="text-xs font-mono text-[var(--td-text-color-primary)] truncate mt-0.5 select-all">{{ mcpUrls.streamableHttpUrl }}</div>
-            </div>
-            <t-button size="small" variant="outline" class="shrink-0" @click="copyText(mcpUrls.streamableHttpUrl, 'Streamable HTTP 地址')">
-              <template #icon><copy-icon /></template>
-              复制 HTTP 地址
-            </t-button>
-          </div>
-
-          <!-- 旧版 SSE 端点 -->
-          <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-2 p-2.5 rounded-lg bg-[var(--td-bg-color-secondarycontainer)] border border-[var(--td-component-border)]">
-            <div class="min-w-0">
-              <div class="text-[11px] font-bold text-[var(--td-text-color-secondary)]">旧版 SSE</div>
-              <div class="text-xs font-mono text-[var(--td-text-color-primary)] truncate mt-0.5 select-all">{{ mcpUrls.sseUrl }}</div>
-            </div>
-            <t-button size="small" variant="outline" class="shrink-0" @click="copyText(mcpUrls.sseUrl, 'SSE 地址')">
-              <template #icon><copy-icon /></template>
-              复制 SSE 地址
-            </t-button>
-          </div>
-
-          <!-- Skill.md 规范 -->
-          <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-2 p-2.5 rounded-lg bg-[var(--td-bg-color-secondarycontainer)] border border-[var(--td-component-border)]">
-            <div class="min-w-0">
-              <div class="text-[11px] font-bold text-[var(--td-text-color-secondary)] uppercase">Skill 规范直连 (GET Markdown)</div>
-              <div class="text-xs font-mono text-[var(--td-text-color-primary)] truncate mt-0.5 select-all">{{ mcpUrls.skillMdUrl }}</div>
-            </div>
-            <div class="flex items-center gap-1.5 shrink-0">
-              <t-button size="small" variant="outline" @click="copyText(mcpUrls.skillMdUrl, 'Skill.md 规范地址')">
-                <template #icon><copy-icon /></template>
-                复制链接
-              </t-button>
-              <t-button size="small" variant="dashed" @click="previewSkillMd">
-                <template #icon><browse-icon /></template>
-                在线预览
-              </t-button>
-            </div>
-          </div>
-        </div>
-
-        <!-- 通用 JSON 配置 (带令牌选择与完整 Token 填充) -->
-        <div class="mt-4 pt-3 border-t border-[var(--td-component-border)]">
-          <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-2 mb-2">
-            <div class="flex items-center gap-2 text-xs text-[var(--td-text-color-secondary)]">
-              <span class="font-bold text-[var(--td-text-color-primary)]">配置文件填入的令牌:</span>
-              <t-select
-                v-if="tokenList.length > 0"
-                v-model="selectedTokenId"
-                :options="tokenSelectOptions"
-                size="small"
-                style="width: 260px"
-                placeholder="选择配置使用的访问令牌"
-              />
-              <span v-else class="text-amber-500 font-medium text-xs">
-                暂无有效令牌，将使用占位符
-              </span>
-            </div>
-            <div class="flex items-center gap-2 shrink-0">
-              <t-button size="small" variant="outline" @click="copyText(standardMcpConfig, '通用 MCP JSON 配置')">
-                <template #icon><copy-icon /></template>
-                复制配置 (含完整 Token)
-              </t-button>
-            </div>
-          </div>
-          <div class="bg-[#1e1e1e] dark:bg-[#141414] text-[#9cdcfe] rounded-xl p-3.5 font-mono text-xs overflow-x-auto shadow-inner border border-[var(--td-component-border)] select-all">
-            <pre class="m-0">{{ standardMcpConfig }}</pre>
-          </div>
-        </div>
-      </div>
-    </div>
-
-    <!-- 新建令牌弹窗 -->
-    <t-dialog
-      v-model:visible="createTokenModalVisible"
-      header="新建 MCP 访问令牌"
-      width="440px"
-      attach="body"
-      :confirm-btn="{ content: '生成令牌', loading: createTokenSubmitting }"
-      @confirm="handleCreateToken"
-    >
-      <div class="space-y-4 py-2">
-        <t-form-item label="备注名称" required-mark>
-          <t-input
-            v-model="tokenForm.name"
-            placeholder="例如：本地 Workbuddy、公司 Cursor"
+      <form v-else class="mcp-dialog-content" novalidate @submit.prevent="createToken">
+        <label class="mcp-field">
+          <span>令牌名称</span>
+          <input
+            ref="nameInput"
+            v-model="name"
+            class="mcp-control"
+            name="mcp-token-name"
+            autocomplete="off"
             maxlength="30"
+            placeholder="例如 Cursor 工作电脑…"
+            required
+            :disabled="creating"
+            :aria-invalid="!!nameError"
+            :aria-describedby="nameError ? 'mcp-name-error' : undefined"
+            @input="nameError = ''"
           />
-        </t-form-item>
-
-        <t-form-item label="有效期">
-          <t-select v-model="tokenForm.expireDays">
-            <t-option :value="7" label="7 天" />
-            <t-option :value="30" label="30 天 (推荐)" />
-            <t-option :value="90" label="90 天" />
-            <t-option :value="180" label="180 天" />
-            <t-option :value="0" label="永久有效" />
-          </t-select>
-        </t-form-item>
-      </div>
+        </label>
+        <p v-if="nameError" id="mcp-name-error" class="field-error" role="alert">{{ nameError }}</p>
+        <label class="mcp-field">
+          <span>有效期</span>
+          <select v-model="expireDays" class="mcp-control" name="mcp-token-expiration" :disabled="creating">
+            <option :value="7">7 天</option>
+            <option :value="30">30 天</option>
+            <option :value="90">90 天</option>
+            <option :value="180">180 天</option>
+            <option :value="0">永久有效</option>
+          </select>
+        </label>
+        <p v-if="createError" class="field-error" role="alert">{{ createError }}</p>
+      </form>
     </t-dialog>
 
-    <!-- 令牌生成成功提示明文弹窗 -->
     <t-dialog
-      v-model:visible="createdTokenDialogVisible"
-      header="令牌生成成功"
-      width="480px"
+      v-model:visible="revokeOpen"
       attach="body"
-      :footer="false"
+      width="min(440px, 92vw)"
+      class="mcp-token-dialog"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="mcp-revoke-title"
+      :close-on-overlay-click="false"
+      :close-on-esc-keydown="!revoking"
+      :close-btn="false"
+      :confirm-btn="{ content: '吊销令牌', theme: 'danger', loading: revoking }"
+      :cancel-btn="revoking ? null : '取消'"
+      @keydown.tab="keepDialogFocus"
+      @opened="revokeHeading?.focus()"
+      @closed="restoreDialogFocus"
+      @confirm="revokeToken"
     >
-      <div class="py-2 space-y-4">
-        <t-alert theme="warning" class="text-xs">
-          请立即复制并妥善保管此令牌！出于安全考虑，完整的明文令牌仅在此处展示一次，关闭后将无法再次查看完整内容。
-        </t-alert>
-
-        <div v-if="newlyCreatedToken" class="space-y-2">
-          <div class="text-xs font-bold text-[var(--td-text-color-primary)]">
-            {{ newlyCreatedToken.name }}
-          </div>
-          <div class="p-3 bg-[var(--td-bg-color-secondarycontainer)] rounded-lg font-mono text-xs text-[var(--td-text-color-primary)] break-all border border-[var(--td-component-border)] select-all">
-            {{ newlyCreatedToken.token }}
-          </div>
-        </div>
-
-        <div class="flex justify-end gap-2 pt-2">
-          <t-button
-            theme="primary"
-            @click="copyText(newlyCreatedToken?.token || '', '完整令牌'); createdTokenDialogVisible = false;"
-          >
-            <template #icon><copy-icon /></template>
-            复制并完成
-          </t-button>
-        </div>
+      <template #header>
+        <h2 id="mcp-revoke-title" ref="revokeHeading" class="mcp-dialog-title" tabindex="-1">吊销访问令牌</h2>
+      </template>
+      <div class="mcp-dialog-content">
+        <p>使用“{{ revokeTarget?.name }}”的客户端将立即失去 MCP 访问权限。</p>
+        <p v-if="revokeError" class="field-error" role="alert">{{ revokeError }}</p>
       </div>
     </t-dialog>
   </div>
 </template>
+
+<style scoped>
+.mcp-management {
+  display: grid;
+  gap: 24px;
+  min-width: 0;
+  padding-bottom: 8px;
+  color: var(--td-text-color-primary);
+}
+
+.mcp-section {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+}
+
+.quick-steps {
+  display: grid;
+  gap: 20px;
+  margin: 3px 0 0;
+  padding-inline-start: 23px;
+}
+
+.quick-steps > li {
+  min-width: 0;
+  padding-inline-start: 4px;
+}
+
+.quick-steps > li::marker {
+  color: var(--td-brand-color);
+  font-weight: 650;
+}
+
+.quick-steps h3 {
+  margin: 0 0 5px;
+  font-size: 15px;
+  line-height: 1.4;
+}
+
+.quick-steps p {
+  margin: 0;
+  color: var(--td-text-color-secondary);
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.client-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.client-link {
+  display: inline-flex;
+  min-height: 32px;
+  box-sizing: border-box;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 9px;
+  border: 1px solid var(--td-component-border);
+  border-radius: var(--td-radius-medium);
+  color: var(--td-brand-color);
+  font-size: 13px;
+  text-decoration: none;
+}
+
+.client-link:hover {
+  background: var(--td-bg-color-container-hover);
+  text-decoration: underline;
+}
+
+.preset {
+  display: grid;
+  justify-items: start;
+  gap: 12px;
+  padding: 12px 13px;
+  border: 1px solid var(--td-component-border);
+  border-radius: 10px;
+  background: var(--td-bg-color-secondarycontainer);
+}
+
+.preset p {
+  color: var(--td-text-color-primary);
+  font-size: 14px;
+}
+
+.preset + p {
+  margin-top: 6px;
+}
+
+.advanced-settings {
+  min-width: 0;
+  padding-top: 10px;
+  border-top: 1px solid var(--td-component-border);
+}
+
+.advanced-settings > summary {
+  width: fit-content;
+  box-sizing: border-box;
+  min-height: 32px;
+  padding: 6px 4px;
+  color: var(--td-text-color-secondary);
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.advanced-settings > summary:hover {
+  color: var(--td-text-color-primary);
+}
+
+.advanced-content {
+  display: grid;
+  gap: 20px;
+  padding-top: 12px;
+}
+
+.section-header,
+.section-actions,
+.endpoint-row,
+.preview-toolbar,
+.token-heading,
+.token-meta,
+.token-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.section-header {
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.section-header h2 {
+  margin: 0;
+  padding-inline-start: 10px;
+  border-inline-start: 3px solid var(--td-brand-color);
+  font-size: 16px;
+  font-weight: 650;
+  line-height: 1.25;
+}
+
+.section-header p {
+  margin: 5px 0 0;
+  color: var(--td-text-color-secondary);
+  font-size: 13px;
+}
+
+.guide-link {
+  display: inline-flex;
+  min-height: 32px;
+  align-items: center;
+  gap: 6px;
+  color: var(--td-brand-color);
+  font-size: 13px;
+  text-decoration: none;
+}
+
+.guide-link:hover {
+  text-decoration: underline;
+}
+
+.connection-panel {
+  min-width: 0;
+  padding: 14px;
+  border: 1px solid var(--td-component-border);
+  border-radius: 12px;
+}
+
+.connection-fields {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.connection-fields > label {
+  flex: 1 1 170px;
+}
+
+.mcp-field {
+  display: grid;
+  min-width: 0;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.mcp-control {
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  min-height: 34px;
+  padding: 5px 8px;
+  border: 1px solid var(--td-component-border);
+  border-radius: var(--td-radius-medium);
+  background: var(--td-bg-color-container);
+  color: var(--td-text-color-primary);
+  font: inherit;
+}
+
+.mcp-control:disabled {
+  background: var(--td-bg-color-component-disabled);
+  color: var(--td-text-color-disabled);
+}
+
+html[theme-mode="dark"] .mcp-control {
+  color-scheme: dark;
+}
+
+.mcp-control:focus-visible,
+.guide-link:focus-visible,
+.client-link:focus-visible,
+.advanced-settings > summary:focus-visible {
+  outline: 2px solid var(--td-brand-color);
+  outline-offset: 2px;
+}
+
+.mcp-control[aria-invalid="true"] {
+  border-color: var(--td-error-color);
+}
+
+.endpoint-row {
+  justify-content: space-between;
+  margin-block: 8px 10px;
+  padding-inline-start: 8px;
+}
+
+.endpoint-row code,
+.token-meta code,
+.created-token code {
+  overflow-wrap: anywhere;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+}
+
+.endpoint-row code {
+  color: var(--td-text-color-secondary);
+  font-size: 12px;
+}
+
+.endpoint-row .t-button {
+  flex-shrink: 0;
+}
+
+.preview {
+  overflow: hidden;
+  border: 1px solid var(--td-component-border);
+  border-radius: 9px;
+}
+
+.preview-toolbar {
+  flex-wrap: wrap;
+  justify-content: space-between;
+  min-height: 42px;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--td-component-border);
+}
+
+.preview-toolbar > span {
+  padding-inline-start: 4px;
+  color: var(--td-text-color-primary);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.preview-details summary {
+  padding: 7px 10px;
+  color: var(--td-text-color-secondary);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.preview-details summary:hover {
+  color: var(--td-text-color-primary);
+  background: var(--td-bg-color-container-hover);
+}
+
+.preview-details summary:focus-visible {
+  outline: 2px solid var(--td-brand-color);
+  outline-offset: -2px;
+}
+
+.config-code {
+  margin: 0;
+  padding: 12px;
+  background: var(--td-bg-color-secondarycontainer);
+  color: var(--td-text-color-primary);
+  font: 12px/1.6 ui-monospace, SFMono-Regular, Consolas, monospace;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.config-note,
+.empty-state,
+.mcp-dialog-content p {
+  margin: 0;
+  color: var(--td-text-color-secondary);
+  font-size: 13px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.config-note {
+  margin-top: 8px;
+}
+
+.empty-state {
+  padding: 16px 12px;
+  border: 1px solid var(--td-component-border);
+  border-radius: 10px;
+}
+
+.token-list {
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+  border: 1px solid var(--td-component-border);
+  border-radius: 10px;
+  list-style: none;
+}
+
+.token-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 4px 12px;
+  padding: 11px 12px;
+}
+
+.token-row + .token-row {
+  border-top: 1px solid var(--td-component-border);
+}
+
+.token-details {
+  flex: 1 1 160px;
+  min-width: 0;
+}
+
+.token-heading,
+.token-meta {
+  flex-wrap: wrap;
+}
+
+.token-name {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.token-meta {
+  gap: 3px 10px;
+  margin-top: 4px;
+  color: var(--td-text-color-secondary);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.token-actions {
+  gap: 0;
+}
+
+.mcp-dialog-content {
+  display: grid;
+  gap: 12px;
+  overscroll-behavior: contain;
+}
+
+.mcp-dialog-title {
+  margin: 0;
+  font: inherit;
+}
+
+.mcp-dialog-content .field-error,
+.quick-steps .field-error {
+  color: var(--td-error-color);
+}
+
+.created-token {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 10px;
+  border-radius: 8px;
+  background: var(--td-bg-color-secondarycontainer);
+}
+
+.created-token code {
+  flex: 1 1 220px;
+  min-width: 0;
+  color: var(--td-text-color-primary);
+}
+
+@media (pointer: coarse) {
+  .guide-link,
+  .client-link,
+  .advanced-settings > summary,
+  .mcp-control,
+  .preview-details summary,
+  .mcp-management .t-button,
+  .mcp-token-dialog :deep(.t-button) {
+    min-height: 44px;
+  }
+
+  .endpoint-row .t-button,
+  .section-actions .t-button--shape-square {
+    min-width: 44px;
+  }
+
+  .preview-details summary {
+    box-sizing: border-box;
+    padding-block: 12px;
+  }
+}
+</style>

@@ -20,9 +20,9 @@ public class MSLXPluginEntry : IPlugin
     public string Id => "mslx-plugins-ai-agents";
     public string Name => "AI 助手";
     public string Description => "基于大语言模型的 Minecraft 服务器智能运维与对话助手";
-    public string Version => "1.0.0";
-    public string Icon => "icon.png";
-    public string MinSDKVersion => "1.7.6";
+    public string Version => "1.0.1";
+    public string Icon => "f06867909c1984881489196158935cf0_3785578587551796133.png";
+    public string MinSDKVersion => "1.7.9";
     public string Developer => "luluxiaoyu";
     public string AuthorUrl => "https://github.com/luluxiaoyu";
     public string PluginUrl => "https://github.com/MSLTeam/mslx-plugins-ai-agents";
