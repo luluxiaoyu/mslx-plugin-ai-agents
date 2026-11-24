@@ -1894,6 +1894,13 @@ public partial class AiService
                 case "query_server_status":
                 {
                     var servers = MSLX.SDK.MSLX.Config.Servers.GetServerList();
+                    if (int.TryParse(args?["server_id"]?.ToString(), out var serverId) && serverId > 0)
+                    {
+                        servers = servers.Where(server => server.ID == serverId).ToList();
+                        if (servers.Count == 0)
+                            return $"[ERROR] 未找到服务器实例 #{serverId}。";
+                    }
+
                     var list = new List<object>();
                     foreach (var s in servers)
                     {

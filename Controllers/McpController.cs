@@ -29,7 +29,7 @@ public class McpController(
 
     [HttpGet("skill.md")]
     public IActionResult GetSkillMarkdown() =>
-        Content(AiSkillManager.GetSkillMarkdown(), "text/markdown; charset=utf-8", Encoding.UTF8);
+        Content(AiSkillManager.GetSkillMarkdown(aiService.GetMcpToolDefinitions()), "text/markdown; charset=utf-8", Encoding.UTF8);
 
     [HttpGet("sse")]
     public async Task GetSse(CancellationToken cancellationToken)

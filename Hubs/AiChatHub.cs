@@ -20,7 +20,7 @@ public class AiChatHub : Hub
 
     public async Task SendMessage(JsonArray messages)
     {
-        var userId = Context.User?.FindFirst("UserId")?.Value ?? "";
+        var userId = RequireCurrentAdministrator();
         _logger.LogInformation("收到 SignalR AI 对话请求，ConnectionId: {ConnectionId}, UserId: {UserId}", Context.ConnectionId, userId);
 
         try
@@ -56,6 +56,8 @@ public class AiChatHub : Hub
 
     public async Task<object> ConfirmToolAction(string confirmationId, bool approved)
     {
+        RequireCurrentAdministrator();
+
         try
         {
             var (success, message, data) = await _aiService.ConfirmPendingToolAsync(
@@ -73,5 +75,20 @@ public class AiChatHub : Hub
             _logger.LogError(ex, "SignalR AI 敏感操作确认异常");
             return new { success = false, message = ex.Message, data = (object?)null };
         }
+    }
+
+    private string RequireCurrentAdministrator()
+    {
+        var user = Context.User;
+        var userId = user?.FindFirst("UserId")?.Value;
+        // The host revalidates delegated node connections before dispatching hub calls.
+        if (!string.IsNullOrEmpty(userId) && user?.IsInRole("admin") == true &&
+            (user.Identity?.AuthenticationType == "NodeAuth" ||
+             MSLX.SDK.MSLX.Config.Users.GetUserById(userId)?.Role == "admin"))
+        {
+            return userId;
+        }
+
+        throw new HubException("当前账号没有管理员权限，请重新登录。");
     }
 }

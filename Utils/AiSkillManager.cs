@@ -1,5 +1,6 @@
 using System.Reflection;
 using System.Text;
+using MSLX.Plugin.AiAgents.Models;
 
 namespace MSLX.Plugin.AiAgents.Utils;
 
@@ -98,7 +99,20 @@ public static class AiSkillManager
         return sb.ToString().Trim();
     }
 
-    public static string GetSkillMarkdown()
+    public static string GetSkillMarkdown(IEnumerable<McpToolDefinition> tools)
+    {
+        var markdown = new StringBuilder(ReadSkillMarkdown());
+        markdown.AppendLine().AppendLine();
+        markdown.AppendLine("## MCP 工具目录").AppendLine();
+        foreach (var tool in tools)
+        {
+            markdown.AppendLine($"- `{tool.Name}` · {tool.Description}");
+        }
+
+        return markdown.ToString();
+    }
+
+    private static string ReadSkillMarkdown()
     {
         // 1. 尝试从内嵌资源读取 SKILL.md
         try

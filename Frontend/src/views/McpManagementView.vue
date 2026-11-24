@@ -14,9 +14,18 @@ const endpoints = getMcpEndpointUrls();
 const transport = ref<'http' | 'sse'>('http');
 const endpoint = computed(() => transport.value === 'http' ? endpoints.streamableHttpUrl : endpoints.sseUrl);
 const transportLabel = computed(() => transport.value === 'http' ? 'Streamable HTTP' : 'SSE');
+const isLocalEndpoint = computed(() => {
+  try {
+    const hostname = new URL(endpoint.value).hostname.replace(/\.$/, '');
+    return hostname === 'localhost' || hostname.endsWith('.localhost') || hostname === '[::1]'
+      || /^127(?:\.\d{1,3}){3}$/.test(hostname) || /^\[::ffff:7f[\da-f]{2}:[\da-f]{1,4}\]$/.test(hostname);
+  } catch {
+    return false;
+  }
+});
 const clients = [
   { name: '腾讯 WorkBuddy', url: 'https://www.codebuddy.cn/work/' },
-  { name: 'Qoder', url: 'https://qoder.cn/download' },
+  { name: 'Qoder（千问）', url: 'https://qoder.cn/download' },
   { name: '豆包电脑版', url: 'https://www.doubao.com/download/desktop' },
 ];
 const presetText = '请帮我连上 MSLX。连好后，告诉我有哪些 Minecraft 服务器。先只查看，别改任何设置。';
@@ -296,12 +305,20 @@ onMounted(loadTokens);
               {{ client.name }} <span aria-hidden="true">↗</span>
             </a>
           </div>
+          <p v-if="isLocalEndpoint" id="mcp-local-address-hint" class="local-address-hint">
+            现在用的是本机地址。请在运行 MSLX 的同一台电脑上打开 AI 工具。
+          </p>
         </li>
         <li>
           <h3>复制这段话</h3>
           <div class="preset">
             <p>{{ presetText }}</p>
-            <t-button theme="primary" :loading="tokensLoading || creating" @click="handleQuickConnect">
+            <t-button
+              theme="primary"
+              :loading="tokensLoading || creating"
+              :aria-describedby="isLocalEndpoint ? 'mcp-local-address-hint' : undefined"
+              @click="handleQuickConnect"
+            >
               <template #icon>
                 <CopyIcon v-if="selectedToken" aria-hidden="true" />
                 <AddIcon v-else-if="!loadError" aria-hidden="true" />
@@ -613,6 +630,10 @@ onMounted(loadTokens);
 .client-link:hover {
   background: var(--td-bg-color-container-hover);
   text-decoration: underline;
+}
+
+.quick-steps .local-address-hint {
+  margin-top: 8px;
 }
 
 .preset {
