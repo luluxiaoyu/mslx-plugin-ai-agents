@@ -68,7 +68,7 @@ public partial class AiService
                     {
                         ["server_id"] = new JsonObject { ["type"] = "number", ["description"] = "目标服务器 ID" },
                         ["file_name"] = new JsonObject { ["type"] = "string", ["description"] = "要还原的备份文件名 (例如 'mslx-backup_20261123_120000.zip')" },
-                        ["confirmed"] = new JsonObject { ["type"] = "boolean", ["description"] = "是否已确认授权执行还原覆盖操作" }
+                        ["confirmed"] = new JsonObject { ["type"] = "boolean", ["description"] = "旧客户端兼容字段，审批由管理员在面板完成" }
                     },
                     ["required"] = new JsonArray { "server_id", "file_name" }
                 }
@@ -90,7 +90,7 @@ public partial class AiService
                     {
                         ["server_id"] = new JsonObject { ["type"] = "number", ["description"] = "目标服务器 ID" },
                         ["file_name"] = new JsonObject { ["type"] = "string", ["description"] = "要删除的备份文件名 (例如 'mslx-backup_20261123_120000.zip')" },
-                        ["confirmed"] = new JsonObject { ["type"] = "boolean", ["description"] = "是否已确认授权执行删除操作" }
+                        ["confirmed"] = new JsonObject { ["type"] = "boolean", ["description"] = "旧客户端兼容字段，审批由管理员在面板完成" }
                     },
                     ["required"] = new JsonArray { "server_id", "file_name" }
                 }
@@ -171,8 +171,7 @@ public partial class AiService
         JsonObject? args,
         Func<string, object, Task> onToolExecuted,
         bool assumeConfirmed,
-        string userId,
-        bool canPromptForConfirmation)
+        string userId)
     {
         switch (name)
         {
@@ -183,10 +182,10 @@ public partial class AiService
                 return await HandleListServerBackupsAsync(args, onToolExecuted);
 
             case "restore_server_backup":
-                return await HandleRestoreServerBackupAsync(args, onToolExecuted, assumeConfirmed, canPromptForConfirmation);
+                return await HandleRestoreServerBackupAsync(args, onToolExecuted, assumeConfirmed, userId);
 
             case "delete_server_backup":
-                return await HandleDeleteServerBackupAsync(args, onToolExecuted, assumeConfirmed, canPromptForConfirmation);
+                return await HandleDeleteServerBackupAsync(args, onToolExecuted, assumeConfirmed, userId);
 
             case "query_frp_status":
                 return await HandleQueryFrpStatusAsync(args, onToolExecuted);
@@ -386,7 +385,7 @@ public partial class AiService
         JsonObject? args,
         Func<string, object, Task> onToolExecuted,
         bool assumeConfirmed,
-        bool canPromptForConfirmation)
+        string userId)
     {
         int targetId = 0;
         if (args != null && args.ContainsKey("server_id") && args["server_id"] != null)
@@ -424,12 +423,12 @@ public partial class AiService
             return $"[ERROR] 还原失败：服务器 '{server.Name}' 当前正在运行中！为防止数据冲突与存档损坏，请先停止服务器后再执行还原。";
         }
 
-        bool isConfirmed = assumeConfirmed || (args != null && args.ContainsKey("confirmed") && args["confirmed"]?.GetValue<bool>() == true);
+        bool isConfirmed = assumeConfirmed;
         if (!isConfirmed)
         {
-            if (!canPromptForConfirmation) return WebPanelConfirmationRequired;
 
-            string confirmationId = CreateOrGetPendingOperation("restore_server_backup", args?.ToJsonString() ?? "{}", server.ID, safeFileName, "edit");
+
+            string confirmationId = CreatePendingOperation("restore_server_backup", args?.ToJsonString() ?? "{}", server.ID, safeFileName, "edit", userId);
             var confirmData = new
             {
                 serverId = server.ID,
@@ -440,7 +439,7 @@ public partial class AiService
                 confirmationId = confirmationId
             };
             await onToolExecuted("restore_server_backup", confirmData);
-            return $"[PENDING_CONFIRMATION] 高风险警告：准备将备份 `{safeFileName}` 还原至服务器 '{server.Name}' (ID: {server.ID})！还原操作将覆盖当前服务器根目录中的现有文件。操作已挂起，前端已弹出确认授权按钮，请用户点击确认后自动执行。";
+            return PendingMessage(confirmationId);
         }
 
         try
@@ -471,7 +470,7 @@ public partial class AiService
         JsonObject? args,
         Func<string, object, Task> onToolExecuted,
         bool assumeConfirmed,
-        bool canPromptForConfirmation)
+        string userId)
     {
         int targetId = 0;
         if (args != null && args.ContainsKey("server_id") && args["server_id"] != null)
@@ -504,12 +503,12 @@ public partial class AiService
             return $"[ERROR] 备份文件不存在：在目录 `{backupDir}` 中未找到 `{safeFileName}`。";
         }
 
-        bool isConfirmed = assumeConfirmed || (args != null && args.ContainsKey("confirmed") && args["confirmed"]?.GetValue<bool>() == true);
+        bool isConfirmed = assumeConfirmed;
         if (!isConfirmed)
         {
-            if (!canPromptForConfirmation) return WebPanelConfirmationRequired;
 
-            string confirmationId = CreateOrGetPendingOperation("delete_server_backup", args?.ToJsonString() ?? "{}", server.ID, safeFileName, "delete");
+
+            string confirmationId = CreatePendingOperation("delete_server_backup", args?.ToJsonString() ?? "{}", server.ID, safeFileName, "delete", userId);
             var confirmData = new
             {
                 serverId = server.ID,
@@ -520,7 +519,7 @@ public partial class AiService
                 confirmationId = confirmationId
             };
             await onToolExecuted("delete_server_backup", confirmData);
-            return $"[PENDING_CONFIRMATION] 高风险警告：准备永久删除服务器 '{server.Name}' 的备份文件 `{safeFileName}`！此操作不可逆。操作已挂起，前端已弹出确认按钮，请用户点击确认授权后自动执行。";
+            return PendingMessage(confirmationId);
         }
 
         try

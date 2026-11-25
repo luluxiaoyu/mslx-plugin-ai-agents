@@ -13,7 +13,7 @@ export const pluginConfig = {
       type: 'drawer',
       id: 'ai-assistant',
       label: 'AI 助手',
-      icon: 'chat-bubble-help',
+      icon: 'ai-1',
       component: AIChatDrawer,
       roleCode: ['admin'],
     },

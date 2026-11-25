@@ -163,7 +163,7 @@ public partial class AiService
     }
 
     private async Task<string?> HandleOpsToolAsync(string name, JsonObject? args, Func<string, object, Task> onToolExecuted,
-        bool assumeConfirmed, string userId, bool canPromptForConfirmation)
+        bool assumeConfirmed, string userId)
     {
         switch (name)
         {
@@ -199,23 +199,23 @@ public partial class AiService
                     bool.TryParse(args["delete_files"]!.ToString(), out deleteFiles);
                 }
 
-                if (deleteFiles && !assumeConfirmed)
+                if (!assumeConfirmed)
                 {
-                    if (!canPromptForConfirmation) return WebPanelConfirmationRequired;
 
-                    string confirmationId = CreateOrGetPendingOperation("delete_server_instance", args?.ToJsonString() ?? "{}", targetServer.ID, targetServer.Name, "delete");
+
+                    string confirmationId = CreatePendingOperation("delete_server_instance", args?.ToJsonString() ?? "{}", targetServer.ID, targetServer.Name, deleteFiles ? "delete_data" : "remove_instance", userId);
                     var confirmData = new
                     {
                         serverId = targetServer.ID,
                         serverName = targetServer.Name,
-                        deleteFiles = true,
+                        deleteFiles,
                         action = "delete",
                         requiresConfirmation = true,
                         confirmed = false,
                         confirmationId = confirmationId
                     };
                     await onToolExecuted("delete_server_instance", confirmData);
-                    return $"[PENDING_CONFIRMATION] 高危操作警告：准备彻底删除服务器 #{targetServer.ID} ({targetServer.Name}) 并永久销毁其物理文件与世界存档！操作已挂起，前端已弹出二次确认卡片，等待用户确认授权后系统将自动执行删除。";
+                    return PendingMessage(confirmationId);
                 }
 
                 if (_lifecycleService.IsServerRunning((uint)targetServer.ID))

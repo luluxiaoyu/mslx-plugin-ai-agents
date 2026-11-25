@@ -1,286 +1,201 @@
 using System.Security.Cryptography;
 using System.Text.Json;
 using MSLX.Plugin.AiAgents.Models;
-using MSLX.SDK;
-using MSLX.SDK.Interfaces;
+using MSLX.Plugin.AiAgents.Utils;
 
 namespace MSLX.Plugin.AiAgents.Services;
 
-public class McpTokenManager
+public sealed class McpTokenManager : IDisposable
 {
-    private const int ToolCallsPerMinute = 60;
-    private readonly object _lock = new();
-    private readonly List<McpTokenRecord> _tokens = new();
-    private string _filePath = string.Empty;
-    private bool _initialized = false;
+    private readonly object _gate = new();
+    private readonly List<McpTokenRecord> _tokens;
+    private readonly string _filePath = Path.Combine(PluginData.DirectoryPath, "mcp_tokens.json");
+    private Timer? _saveTimer;
+    private bool _dirty;
 
     public McpTokenManager()
     {
-        InitializeStorage();
+        _tokens = File.Exists(_filePath)
+            ? JsonSerializer.Deserialize<List<McpTokenRecord>>(File.ReadAllText(_filePath)) ?? new()
+            : new();
+        if (!File.Exists(_filePath)) GenerateToken("Default Local Agent", null);
     }
 
-    private void InitializeStorage()
+    private void Save()
     {
-        lock (_lock)
+        PluginData.WriteJson(_filePath, _tokens);
+        _dirty = false;
+    }
+
+    private void SaveUsage()
+    {
+        lock (_gate)
         {
-            if (_initialized) return;
-
-            try
-            {
-                string dataDir;
-                try
-                {
-                    dataDir = MSLXPluginEntry.Instance.Config().GetDataPath();
-                }
-                catch
-                {
-                    dataDir = Path.Combine(AppContext.BaseDirectory, "DaemonData", "PluginsData", "mslx-plugin-ai-agents");
-                }
-
-                if (!Directory.Exists(dataDir))
-                {
-                    Directory.CreateDirectory(dataDir);
-                }
-
-                _filePath = Path.Combine(dataDir, "mcp_tokens.json");
-
-                if (File.Exists(_filePath))
-                {
-                    var json = File.ReadAllText(_filePath);
-                    if (!string.IsNullOrWhiteSpace(json))
-                    {
-                        var loaded = JsonSerializer.Deserialize<List<McpTokenRecord>>(json);
-                        if (loaded != null)
-                        {
-                            _tokens.Clear();
-                            _tokens.AddRange(loaded);
-                        }
-                    }
-                }
-                else
-                {
-                    // 若无 token 文件，可初始化一个默认的永久本地 Token 便于首次体验
-                    var defaultToken = new McpTokenRecord
-                    {
-                        Id = Guid.NewGuid().ToString("N"),
-                        Name = "Default Local Agent",
-                        Token = GenerateTokenString(),
-                        CreatedAt = DateTime.UtcNow,
-                        ExpiresAt = null,
-                        IsRevoked = false
-                    };
-                    _tokens.Add(defaultToken);
-                    SaveToFileLocked();
-                }
-
-                _initialized = true;
-            }
+            if (!_dirty) return;
+            try { Save(); }
             catch (Exception ex)
             {
-                SDK.MSLX.Logger.Error($"[McpTokenManager] 初始化 Token 存储失败: {ex.Message}");
+                MSLX.SDK.MSLX.Logger.Error($"无法保存 MCP 令牌使用时间: {ex.Message}");
+                _saveTimer?.Change(TimeSpan.FromSeconds(5), Timeout.InfiniteTimeSpan);
             }
         }
     }
 
-    private void SaveToFileLocked()
+    private void MarkDirty()
     {
-        try
-        {
-            if (string.IsNullOrEmpty(_filePath)) return;
-            var dir = Path.GetDirectoryName(_filePath);
-            if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
-            {
-                Directory.CreateDirectory(dir);
-            }
+        if (_dirty) return;
+        _dirty = true;
+        _saveTimer ??= new Timer(_ => SaveUsage());
+        _saveTimer.Change(TimeSpan.FromSeconds(5), Timeout.InfiniteTimeSpan);
+    }
 
-            var options = new JsonSerializerOptions { WriteIndented = true };
-            var json = JsonSerializer.Serialize(_tokens, options);
-            File.WriteAllText(_filePath, json);
-        }
-        catch (Exception ex)
+    public void Dispose()
+    {
+        lock (_gate)
         {
-            SDK.MSLX.Logger.Error($"[McpTokenManager] 保存 Token 异常: {ex.Message}");
+            _saveTimer?.Dispose();
+            _saveTimer = null;
+            SaveUsage();
         }
     }
 
-    private static string GenerateTokenString()
+    public McpTokenDto GenerateToken(string name, int? expiresInDays, bool readOnly = false, int[]? serverIds = null)
     {
-        byte[] randomBytes = new byte[16];
-        RandomNumberGenerator.Fill(randomBytes);
-        return $"mslx_mcp_{Convert.ToHexString(randomBytes).ToLowerInvariant()}";
-    }
-
-    private static string MaskToken(string token)
-    {
-        if (string.IsNullOrEmpty(token)) return string.Empty;
-        if (token.Length <= 14) return $"{token[..Math.Min(9, token.Length)]}...";
-        return $"{token[..13]}...{token[^4..]}";
-    }
-
-    public McpTokenCreatedDto GenerateToken(string name, int? expiresInDays)
-    {
-        InitializeStorage();
-        lock (_lock)
+        lock (_gate)
         {
-            DateTime? expiresAt = expiresInDays.HasValue && expiresInDays.Value > 0
-                ? DateTime.UtcNow.AddDays(expiresInDays.Value)
-                : null;
-
+            var now = DateTime.UtcNow;
             var record = new McpTokenRecord
             {
-                Id = Guid.NewGuid().ToString("N"),
-                Name = string.IsNullOrWhiteSpace(name) ? "MCP Agent" : name.Trim(),
-                Token = GenerateTokenString(),
-                CreatedAt = DateTime.UtcNow,
-                ExpiresAt = expiresAt,
-                IsRevoked = false
+                Name = name.Trim(),
+                Token = $"mslx_mcp_{Convert.ToHexString(RandomNumberGenerator.GetBytes(16)).ToLowerInvariant()}",
+                CreatedAt = now,
+                ExpiresAt = expiresInDays > 0 ? now.AddDays(expiresInDays.Value) : null,
+                ReadOnly = readOnly,
+                ServerIds = serverIds?.Distinct().ToArray()
             };
-
             _tokens.Add(record);
-            SaveToFileLocked();
-
-            return new McpTokenCreatedDto
-            {
-                Id = record.Id,
-                Name = record.Name,
-                Token = record.Token,
-                MaskedToken = MaskToken(record.Token),
-                CreatedAt = record.CreatedAt,
-                ExpiresAt = record.ExpiresAt,
-                LastUsedAt = record.LastUsedAt,
-                IsRevoked = record.IsRevoked,
-                Status = "active"
-            };
+            try { Save(); }
+            catch { _tokens.Remove(record); throw; }
+            return ToDto(record, now);
         }
     }
 
     public bool ValidateToken(string? token, out McpTokenRecord? matchedRecord)
     {
-        matchedRecord = null;
-        if (string.IsNullOrWhiteSpace(token)) return false;
-
-        InitializeStorage();
-        var rawToken = token.Trim();
-        if (rawToken.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase))
+        lock (_gate)
         {
-            rawToken = rawToken["Bearer ".Length..].Trim();
-        }
-
-        lock (_lock)
-        {
-            var found = _tokens.FirstOrDefault(t => t.Token == rawToken);
-            var now = DateTime.UtcNow;
-            if (found == null || !IsUsable(found, now))
-                return false;
-
-            found.LastUsedAt = now;
-            matchedRecord = found;
-
-            _ = Task.Run(() =>
-            {
-                lock (_lock)
-                {
-                    SaveToFileLocked();
-                }
-            });
-
-            return true;
+            var raw = token?.Trim();
+            if (raw?.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase) == true) raw = raw[7..].Trim();
+            matchedRecord = _tokens.Find(record => record.Token == raw && IsUsable(record, DateTime.UtcNow));
+            return matchedRecord != null;
         }
     }
 
     internal bool IsActive(McpTokenRecord token)
     {
-        lock (_lock)
+        lock (_gate) return _tokens.Contains(token) && IsUsable(token, DateTime.UtcNow);
+    }
+
+    internal bool IsActive(string id)
+    {
+        lock (_gate) return _tokens.Any(token => token.Id == id && IsUsable(token, DateTime.UtcNow));
+    }
+
+    internal bool CanApprove(string id, int serverId)
+    {
+        lock (_gate)
+            return _tokens.Any(token => token.Id == id && IsUsable(token, DateTime.UtcNow) &&
+                !token.ReadOnly && (token.ServerIds == null || token.ServerIds.Contains(serverId)));
+    }
+
+    internal string? GetName(string id)
+    {
+        lock (_gate) return _tokens.Find(token => token.Id == id)?.Name;
+    }
+
+    internal bool MarkUsed(McpTokenRecord token, bool toolListRead)
+    {
+        lock (_gate)
         {
-            return _tokens.Contains(token) && IsUsable(token, DateTime.UtcNow);
+            if (!_tokens.Contains(token) || !IsUsable(token, DateTime.UtcNow)) return false;
+            token.LastUsedAt = DateTime.UtcNow;
+            if (toolListRead) token.ConnectedAt ??= token.LastUsedAt;
+            MarkDirty();
+            return true;
         }
     }
 
     internal bool TryUseTool(McpTokenRecord token)
     {
-        lock (_lock)
+        lock (_gate)
         {
             var now = DateTime.UtcNow;
-            if (!_tokens.Contains(token) || !IsUsable(token, now))
-                return false;
-
+            if (!_tokens.Contains(token) || !IsUsable(token, now)) return false;
             if (now - token.ToolCallWindowStartedAt >= TimeSpan.FromMinutes(1))
             {
                 token.ToolCallWindowStartedAt = now;
                 token.ToolCallsInWindow = 0;
             }
-
-            if (token.ToolCallsInWindow >= ToolCallsPerMinute)
-                return false;
-
+            if (token.ToolCallsInWindow >= 60) return false;
             token.ToolCallsInWindow++;
             return true;
         }
     }
 
     private static bool IsUsable(McpTokenRecord token, DateTime now) =>
-        !token.IsRevoked && (!token.ExpiresAt.HasValue || now < token.ExpiresAt.Value);
+        !token.IsRevoked && (token.ExpiresAt == null || now < token.ExpiresAt);
+
+    private static McpTokenDto ToDto(McpTokenRecord token, DateTime now) => new()
+    {
+        Id = token.Id,
+        Name = token.Name,
+        Token = IsUsable(token, now) ? token.Token : "",
+        MaskedToken = token.Token.Length > 14 ? $"{token.Token[..13]}…{token.Token[^4..]}" : "••••",
+        CreatedAt = token.CreatedAt,
+        ExpiresAt = token.ExpiresAt,
+        LastUsedAt = token.LastUsedAt,
+        ConnectedAt = token.ConnectedAt,
+        ReadOnly = token.ReadOnly,
+        ServerIds = token.ServerIds,
+        IsRevoked = token.IsRevoked,
+        Status = token.IsRevoked ? "revoked" : IsUsable(token, now) ? "active" : "expired"
+    };
 
     public List<McpTokenDto> ListTokens()
     {
-        InitializeStorage();
-        lock (_lock)
+        lock (_gate)
         {
             var now = DateTime.UtcNow;
-            return _tokens.Select(t =>
-            {
-                string status = "active";
-                if (t.IsRevoked)
-                {
-                    status = "revoked";
-                }
-                else if (t.ExpiresAt.HasValue && now > t.ExpiresAt.Value)
-                {
-                    status = "expired";
-                }
-
-                string masked = MaskToken(t.Token);
-                return new McpTokenDto
-                {
-                    Id = t.Id,
-                    Name = t.Name,
-                    Token = t.Token,
-                    MaskedToken = masked,
-                    CreatedAt = t.CreatedAt,
-                    ExpiresAt = t.ExpiresAt,
-                    LastUsedAt = t.LastUsedAt,
-                    IsRevoked = t.IsRevoked,
-                    Status = status
-                };
-            }).OrderByDescending(t => t.CreatedAt).ToList();
+            return _tokens.OrderByDescending(token => token.CreatedAt).Select(token => ToDto(token, now)).ToList();
         }
     }
 
     public bool RevokeToken(string id)
     {
-        InitializeStorage();
-        lock (_lock)
+        lock (_gate)
         {
-            var found = _tokens.FirstOrDefault(t => t.Id == id);
+            var found = _tokens.Find(token => token.Id == id);
             if (found == null) return false;
-
+            if (found.IsRevoked) return true;
             found.IsRevoked = true;
             found.RevokedAt = DateTime.UtcNow;
-            SaveToFileLocked();
+            try { Save(); }
+            catch { found.IsRevoked = false; found.RevokedAt = null; throw; }
             return true;
         }
     }
 
     public bool DeleteToken(string id)
     {
-        InitializeStorage();
-        lock (_lock)
+        lock (_gate)
         {
-            var found = _tokens.FirstOrDefault(t => t.Id == id);
+            var found = _tokens.Find(token => token.Id == id);
             if (found == null) return false;
-
+            if (IsUsable(found, DateTime.UtcNow))
+                throw new InvalidOperationException("请先吊销该访问令牌，再永久删除。");
             _tokens.Remove(found);
-            SaveToFileLocked();
+            try { Save(); }
+            catch { _tokens.Add(found); throw; }
             return true;
         }
     }

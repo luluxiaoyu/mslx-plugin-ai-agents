@@ -9,12 +9,6 @@ import 'md-editor-v3/lib/preview.css';
 import {
   DesktopIcon,
   DeleteIcon,
-  ErrorCircleFilledIcon,
-  CheckCircleIcon,
-  CloseCircleIcon,
-  CheckCircleFilledIcon,
-  CloseCircleFilledIcon,
-  CodeIcon,
   CopyIcon,
   RefreshIcon,
   LightbulbIcon,
@@ -26,14 +20,10 @@ import {
 } from 'tdesign-icons-vue-next';
 import ModeSelectView from './ModeSelectView.vue';
 import McpManagementView from './McpManagementView.vue';
-import {
-  sendAiChatStream,
-  abortAiChatStream,
-  type ChatMessage,
-  confirmAiToolAction,
-  getAiSettings,
-  updateAiSettings,
-} from '../api/aiApi';
+import { useAiApi, statusLabels, type ChatMessage, type ChatTurnStatus } from '../api/aiApi';
+
+const { sendAiChatStream, abortAiChatStream, confirmAiToolAction, getAiSettings,
+  updateAiSettings, testModel, getTurnStatus, historyKey } = useAiApi();
 
 const props = defineProps<{
   visible: boolean;
@@ -72,10 +62,12 @@ interface DisplayMessage {
   content: string;
   time?: string;
   toolData?: { tool: string; data: any };
+  toolResults?: { tool: string; data: any }[];
+  turnId?: string;
+  turnStatus?: ChatTurnStatus;
   toolExpanded?: string[];
 }
 
-const AI_CHAT_HISTORY_KEY = 'mslx_ai_chat_history';
 
 const displayMode = ref<'drawer' | 'floating'>(
   (localStorage.getItem('mslx_ai_display_mode') as 'drawer' | 'floating') || 'drawer'
@@ -99,6 +91,18 @@ const handleSwitchToModeSelect = () => {
 // ================= API Key 模型设置弹窗 =================
 const settingsModalVisible = ref(false);
 const settingsLoading = ref(false);
+const testingModel = ref(false);
+const handleTestModel = async () => {
+  testingModel.value = true;
+  try {
+    const { message } = await testModel({ ...aiSettingsForm.value, aiEnabled: true });
+    MessagePlugin.success(message);
+  } catch (error) {
+    MessagePlugin.error(error instanceof Error ? error.message : '模型连接失败。');
+  } finally {
+    testingModel.value = false;
+  }
+};
 const settingsSubmitting = ref(false);
 
 const aiSettingsForm = ref({
@@ -248,7 +252,7 @@ const getCurrentServerId = (): number | null => {
 
 const loadHistory = (): DisplayMessage[] => {
   try {
-    const saved = localStorage.getItem(AI_CHAT_HISTORY_KEY);
+    const saved = historyKey ? localStorage.getItem(historyKey) : null;
     if (saved) {
       const parsed = JSON.parse(saved);
       if (Array.isArray(parsed) && parsed.length > 0) {
@@ -286,7 +290,7 @@ watch(
       const toSave = newVal.filter(
         (m) => !(m.role === 'assistant' && m.content === '正在思考与处理...' && !m.toolData)
       );
-      localStorage.setItem(AI_CHAT_HISTORY_KEY, JSON.stringify(toSave));
+      if (historyKey) localStorage.setItem(historyKey, JSON.stringify(toSave));
     } catch (e) {
       console.error('保存 AI 聊天历史失败:', e);
     }
@@ -304,24 +308,23 @@ const handleClearHistory = () => {
   }
   chatList.value = [{ ...defaultWelcomeMessage, id: `welcome_${Date.now()}` }];
   suggestedReplies.value = [];
-  localStorage.removeItem(AI_CHAT_HISTORY_KEY);
+  if (historyKey) localStorage.removeItem(historyKey);
   MessagePlugin.success('AI 对话历史已成功清空');
 };
 
 const handleAbort = () => {
   if (!loading.value) return;
-  abortAiChatStream();
-  loading.value = false;
+  void abortAiChatStream().catch(() => MessagePlugin.warning("无法确认停止状态，请刷新本轮执行状态。"));
 
   const lastMsg = chatList.value[chatList.value.length - 1];
   if (lastMsg && lastMsg.role === 'assistant') {
     if (lastMsg.content === '正在思考与处理...') {
-      lastMsg.content = '🛑 对话已被用户主动中断。';
+      lastMsg.content = '已请求停止。可查看本轮执行状态。';
     } else {
-      lastMsg.content += '\n\n🛑 对话已被用户主动中断。';
+      lastMsg.content += '\n\n已请求停止。可查看本轮执行状态。';
     }
   }
-  MessagePlugin.warning('已手动中断 AI 对话响应');
+  MessagePlugin.info('已请求停止。');
 };
 
 const cleanToolResultText = (text: string): string =>
@@ -374,15 +377,6 @@ const toolFriendlyNames: Record<string, string> = {
 const getToolFriendlyName = (toolName?: string): string => {
   if (!toolName) return '思考与处理';
   return toolFriendlyNames[toolName] || toolName;
-};
-
-const appendToolResult = (msg: DisplayMessage, resultText: string) => {
-  const text = cleanToolResultText(resultText) || '操作已处理。';
-  if (!msg.content || msg.content === '正在思考与处理...') {
-    msg.content = text;
-  } else {
-    msg.content = `${msg.content}\n\n${text}`;
-  }
 };
 
 const syncHostStores = (toolName?: string) => {
@@ -462,40 +456,30 @@ const syncHostStores = (toolName?: string) => {
   }
 };
 
-const handleConfirmToolAction = async (msg: DisplayMessage) => {
-  if (!msg.toolData?.data?.confirmationId || confirmingToolId.value) return;
-  confirmingToolId.value = msg.id;
+const decideToolAction = async (tool: { tool: string; data: any }, approved: boolean) => {
+  const id = tool.data?.confirmationId;
+  if (!id || confirmingToolId.value) return;
+  confirmingToolId.value = id;
   try {
-    const result = await confirmAiToolAction(msg.toolData.data.confirmationId, true);
-    const resultData = (result.data || {}) as Record<string, any>;
-    msg.toolData.data = { ...msg.toolData.data, ...resultData, confirmed: true };
-    appendToolResult(msg, result.message);
-    if (result.message && result.message.includes('[ERROR]')) {
-      MessagePlugin.error(cleanToolResultText(result.message));
+    const result = await confirmAiToolAction(id, approved);
+    tool.data = { ...tool.data, outcome: result.data?.status ?? (result.success ? 'succeeded' : 'unknown') };
+    if (result.success) {
+      MessagePlugin.success(approved ? '操作已执行' : '已拒绝操作');
+      if (approved) syncHostStores(tool.tool);
     } else {
-      MessagePlugin.success('已确认授权，操作已执行');
-      syncHostStores(msg.toolData.tool);
+      MessagePlugin.error(cleanToolResultText(result.message));
     }
-  } catch (e: any) {
-    MessagePlugin.error(`确认失败: ${e.message || e}`);
+  } catch (error) {
+    MessagePlugin.error(error instanceof Error ? error.message : '无法获取操作结果，请到 MCP 页刷新确认。');
   } finally {
     confirmingToolId.value = null;
   }
 };
 
-const handleRejectToolAction = async (msg: DisplayMessage) => {
-  if (!msg.toolData?.data?.confirmationId || confirmingToolId.value) return;
-  confirmingToolId.value = msg.id;
-  try {
-    const result = await confirmAiToolAction(msg.toolData.data.confirmationId, false);
-    msg.toolData.data = { ...msg.toolData.data, rejected: true, confirmed: false };
-    appendToolResult(msg, result.message || '已拒绝该敏感操作。');
-    MessagePlugin.info('已拒绝该敏感文件操作');
-  } catch (e: any) {
-    MessagePlugin.error(`操作失败: ${e.message || e}`);
-  } finally {
-    confirmingToolId.value = null;
-  }
+const refreshTurn = async (message: DisplayMessage) => {
+  if (!message.turnId) return;
+  try { message.turnStatus = await getTurnStatus(message.turnId); }
+  catch { MessagePlugin.error('无法查询本轮状态，请稍后重试。'); }
 };
 
 const handleQuickSend = (text: string) => {
@@ -543,9 +527,11 @@ const handleSend = async (value?: string) => {
   inputText.value = '';
   loading.value = true;
 
-  const botMsgId = `bot_${Date.now()}`;
+  const turnId = Array.from(crypto.getRandomValues(new Uint8Array(16)), value => value.toString(16).padStart(2, "0")).join("");
+  const botMsgId = `bot_${turnId}`;
   chatList.value.push({
     id: botMsgId,
+    turnId,
     role: 'assistant',
     content: '正在思考与处理...',
     time: formatTime(),
@@ -575,7 +561,7 @@ const handleSend = async (value?: string) => {
   let isFirstChunk = true;
 
   await sendAiChatStream(
-    apiMessages,
+    turnId, apiMessages,
     (chunk) => {
       const target = chatList.value.find((m) => m.id === botMsgId);
       if (target) {
@@ -594,8 +580,14 @@ const handleSend = async (value?: string) => {
       }
       const target = chatList.value.find((m) => m.id === botMsgId);
       if (target) {
-        target.toolData = { tool: toolName, data: toolData };
-        target.toolExpanded = [];
+        const results = (target.toolResults ??= []);
+        if (toolData?.status === 'executing' || !results.length) {
+          target.toolData = { tool: toolName, data: toolData };
+          results.push(target.toolData);
+        } else {
+          Object.assign(results[results.length - 1]!, { tool: toolName, data: { ...results[results.length - 1]!.data, ...toolData } });
+          target.toolData = results[results.length - 1];
+        }
       }
       syncHostStores(toolName);
     },
@@ -623,6 +615,10 @@ const handleSend = async (value?: string) => {
         }
       }
       loading.value = false;
+    },
+    (status) => {
+      const target = chatList.value.find((m) => m.id === botMsgId);
+      if (target) target.turnStatus = status;
     }
   );
 };
@@ -761,74 +757,34 @@ onBeforeUnmount(() => {
                   </div>
                 </template>
 
-                <div
-                  v-if="msg.toolData?.data?.requiresConfirmation && !msg.toolData?.data?.confirmed && !msg.toolData?.data?.rejected"
-                  class="action-confirm-card danger-theme"
-                >
-                  <div class="card-header">
-                    <div class="header-left">
-                      <div class="pulse-icon danger">
-                        <error-circle-filled-icon />
-                      </div>
-                      <span class="card-title">需要您的授权确认</span>
+                <div v-for="(tool, index) in msg.toolResults || (msg.toolData ? [msg.toolData] : [])" :key="index" class="tool-debug-collapse">
+                  <div v-if="tool.data?.requiresConfirmation && (!tool.data.outcome || tool.data.outcome === 'pending')" class="action-confirm-card danger-theme">
+                    <div class="card-body">
+                      <strong>{{ getToolFriendlyName(tool.tool) }}</strong>
+                      <p>实例 #{{ tool.data.serverId }} · {{ tool.data.filePath || tool.data.serverName || tool.data.targets?.join(', ') }}</p>
+                      <p v-if="typeof tool.data.contentLength === 'number'">拟写入 {{ tool.data.contentLength }} 个字符</p>
+                      <p v-if="tool.tool === 'delete_server_instance'">{{ tool.data.deleteFiles ? '删除实例和存档' : '移除实例配置，保留文件' }}</p>
                     </div>
-                    <t-tag size="small" theme="danger" variant="light-outline">高风险操作</t-tag>
+                    <div class="card-footer">
+                      <t-button theme="danger" size="small" :disabled="!!confirmingToolId" @click="decideToolAction(tool, true)">确认执行</t-button>
+                      <t-button variant="outline" size="small" :disabled="!!confirmingToolId" @click="decideToolAction(tool, false)">拒绝</t-button>
+                    </div>
                   </div>
-                  <div class="card-body">
-                    AI 申请对文件/目录 <code class="file-code">{{ msg.toolData.data.filePath }}</code> 执行
-                    <strong class="action-highlight red">
-                      {{ msg.toolData.data.action === 'delete' ? '【彻底删除】' : '【覆盖修改】' }}
-                    </strong> 操作。此操作不可逆！
-                  </div>
-                  <div class="card-footer">
-                    <t-button
-                      theme="danger"
-                      size="small"
-                      class="action-btn"
-                      :loading="confirmingToolId === msg.id"
-                      :disabled="!!confirmingToolId"
-                      @click="handleConfirmToolAction(msg)"
-                    >
-                      <template #icon><check-circle-icon /></template>
-                      确认授权{{ msg.toolData.data.action === 'delete' ? '删除' : '写入' }}
-                    </t-button>
-                    <t-button
-                      theme="default"
-                      variant="outline"
-                      size="small"
-                      class="action-btn"
-                      :disabled="!!confirmingToolId"
-                      @click="handleRejectToolAction(msg)"
-                    >
-                      <template #icon><close-circle-icon /></template>
-                      拒绝操作
-                    </t-button>
-                  </div>
-                </div>
-
-                <div v-else-if="msg.toolData?.data?.confirmed || msg.toolData?.data?.rejected" class="action-status-bar">
-                  <t-tag v-if="msg.toolData?.data?.confirmed" theme="success" variant="light" size="small">
-                    <template #icon><check-circle-filled-icon /></template>
-                    已授权{{ msg.toolData.data.action === 'delete' ? '删除' : '写入' }}: {{ msg.toolData.data.filePath }}
-                  </t-tag>
-                  <t-tag v-else theme="danger" variant="light" size="small">
-                    <template #icon><close-circle-filled-icon /></template>
-                    已拒绝{{ msg.toolData.data.action === 'delete' ? '删除' : '写入' }}操作
-                  </t-tag>
-                </div>
-
-                <div v-if="msg.toolData" class="tool-debug-collapse">
-                  <t-collapse v-model="msg.toolExpanded" borderless size="small">
-                    <t-collapse-panel value="tool_detail">
-                      <template #header>
-                        <div class="tool-debug-title">
-                          <code-icon />
-                          <span>调取工具: {{ msg.toolData.tool }}</span>
-                        </div>
-                      </template>
-                      <pre class="tool-json-code">{{ JSON.stringify(msg.toolData.data, null, 2) }}</pre>
+                  <t-collapse borderless size="small">
+                    <t-collapse-panel :value="index">
+                      <template #header>{{ getToolFriendlyName(tool.tool) }} · {{ statusLabels[tool.data?.outcome || tool.data?.status] || '已返回' }}</template>
+                      <pre class="tool-json-code">{{ JSON.stringify(tool.data, null, 2) }}</pre>
                     </t-collapse-panel>
                   </t-collapse>
+                </div>
+                <div v-if="msg.turnId && msg.id !== activeStreamingId" class="tool-debug-collapse">
+                  <t-button size="small" variant="text" @click="refreshTurn(msg)">查看本轮执行状态</t-button>
+                  <div v-if="msg.turnStatus" role="status">
+                    {{ statusLabels[msg.turnStatus.status] || msg.turnStatus.status }}
+                    <ul v-if="msg.turnStatus.tools.length">
+                      <li v-for="(item, index) in msg.turnStatus.tools" :key="index">{{ getToolFriendlyName(item.tool) }} · {{ statusLabels[item.status] || item.status }}</li>
+                    </ul>
+                  </div>
                 </div>
               </template>
               <template #actions>
@@ -1001,74 +957,34 @@ onBeforeUnmount(() => {
                       </div>
                     </template>
 
-                    <div
-                      v-if="msg.toolData?.data?.requiresConfirmation && !msg.toolData?.data?.confirmed && !msg.toolData?.data?.rejected"
-                      class="action-confirm-card danger-theme"
-                    >
-                      <div class="card-header">
-                        <div class="header-left">
-                          <div class="pulse-icon danger">
-                            <error-circle-filled-icon />
-                          </div>
-                          <span class="card-title">需要您的授权确认</span>
+                    <div v-for="(tool, index) in msg.toolResults || (msg.toolData ? [msg.toolData] : [])" :key="index" class="tool-debug-collapse">
+                      <div v-if="tool.data?.requiresConfirmation && (!tool.data.outcome || tool.data.outcome === 'pending')" class="action-confirm-card danger-theme">
+                        <div class="card-body">
+                          <strong>{{ getToolFriendlyName(tool.tool) }}</strong>
+                          <p>实例 #{{ tool.data.serverId }} · {{ tool.data.filePath || tool.data.serverName || tool.data.targets?.join(', ') }}</p>
+                          <p v-if="typeof tool.data.contentLength === 'number'">拟写入 {{ tool.data.contentLength }} 个字符</p>
+                      <p v-if="tool.tool === 'delete_server_instance'">{{ tool.data.deleteFiles ? '删除实例和存档' : '移除实例配置，保留文件' }}</p>
                         </div>
-                        <t-tag size="small" theme="danger" variant="light-outline">高风险操作</t-tag>
+                        <div class="card-footer">
+                          <t-button theme="danger" size="small" :disabled="!!confirmingToolId" @click="decideToolAction(tool, true)">确认执行</t-button>
+                          <t-button variant="outline" size="small" :disabled="!!confirmingToolId" @click="decideToolAction(tool, false)">拒绝</t-button>
+                        </div>
                       </div>
-                      <div class="card-body">
-                        AI 申请对文件/目录 <code class="file-code">{{ msg.toolData.data.filePath }}</code> 执行
-                        <strong class="action-highlight red">
-                          {{ msg.toolData.data.action === 'delete' ? '【彻底删除】' : '【覆盖修改】' }}
-                        </strong> 操作。此操作不可逆！
-                      </div>
-                      <div class="card-footer">
-                        <t-button
-                          theme="danger"
-                          size="small"
-                          class="action-btn"
-                          :loading="confirmingToolId === msg.id"
-                          :disabled="!!confirmingToolId"
-                          @click="handleConfirmToolAction(msg)"
-                        >
-                          <template #icon><check-circle-icon /></template>
-                          确认授权{{ msg.toolData.data.action === 'delete' ? '删除' : '写入' }}
-                        </t-button>
-                        <t-button
-                          theme="default"
-                          variant="outline"
-                          size="small"
-                          class="action-btn"
-                          :disabled="!!confirmingToolId"
-                          @click="handleRejectToolAction(msg)"
-                        >
-                          <template #icon><close-circle-icon /></template>
-                          拒绝操作
-                        </t-button>
-                      </div>
-                    </div>
-
-                    <div v-else-if="msg.toolData?.data?.confirmed || msg.toolData?.data?.rejected" class="action-status-bar">
-                      <t-tag v-if="msg.toolData?.data?.confirmed" theme="success" variant="light" size="small">
-                        <template #icon><check-circle-filled-icon /></template>
-                        已授权{{ msg.toolData.data.action === 'delete' ? '删除' : '写入' }}: {{ msg.toolData.data.filePath }}
-                      </t-tag>
-                      <t-tag v-else theme="danger" variant="light" size="small">
-                        <template #icon><close-circle-filled-icon /></template>
-                        已拒绝{{ msg.toolData.data.action === 'delete' ? '删除' : '写入' }}操作
-                      </t-tag>
-                    </div>
-
-                    <div v-if="msg.toolData" class="tool-debug-collapse">
-                      <t-collapse v-model="msg.toolExpanded" borderless size="small">
-                        <t-collapse-panel value="tool_detail">
-                          <template #header>
-                            <div class="tool-debug-title">
-                              <code-icon />
-                              <span>调取工具: {{ msg.toolData.tool }}</span>
-                            </div>
-                          </template>
-                          <pre class="tool-json-code">{{ JSON.stringify(msg.toolData.data, null, 2) }}</pre>
+                      <t-collapse borderless size="small">
+                        <t-collapse-panel :value="index">
+                          <template #header>{{ getToolFriendlyName(tool.tool) }} · {{ statusLabels[tool.data?.outcome || tool.data?.status] || '已返回' }}</template>
+                          <pre class="tool-json-code">{{ JSON.stringify(tool.data, null, 2) }}</pre>
                         </t-collapse-panel>
                       </t-collapse>
+                    </div>
+                    <div v-if="msg.turnId && msg.id !== activeStreamingId" class="tool-debug-collapse">
+                      <t-button size="small" variant="text" @click="refreshTurn(msg)">查看本轮执行状态</t-button>
+                      <div v-if="msg.turnStatus" role="status">
+                        {{ statusLabels[msg.turnStatus.status] || msg.turnStatus.status }}
+                        <ul v-if="msg.turnStatus.tools.length">
+                          <li v-for="(item, index) in msg.turnStatus.tools" :key="index">{{ getToolFriendlyName(item.tool) }} · {{ statusLabels[item.status] || item.status }}</li>
+                        </ul>
+                      </div>
                     </div>
                   </template>
                   <template #actions>
@@ -1136,7 +1052,7 @@ onBeforeUnmount(() => {
     <t-dialog
       v-model:visible="settingsModalVisible"
       header="AI 助手模型配置"
-      width="480px"
+      width="min(480px, 92vw)"
       attach="body"
       :confirm-btn="{ content: '保存配置', loading: settingsSubmitting }"
       @confirm="handleSaveAiSettings"
@@ -1167,6 +1083,7 @@ onBeforeUnmount(() => {
             placeholder="默认 deepseek-chat"
           />
         </t-form-item>
+        <t-button variant="outline" :loading="testingModel" :disabled="settingsSubmitting" @click="handleTestModel">测试模型连接</t-button>
       </div>
     </t-dialog>
   </div>

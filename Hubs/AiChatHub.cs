@@ -18,24 +18,26 @@ public class AiChatHub : Hub
         _logger = logger;
     }
 
-    public async Task SendMessage(JsonArray messages)
+    public Task SendMessage(JsonArray messages) => StartChatTurn(Guid.NewGuid().ToString("N"), messages);
+
+    public async Task StartChatTurn(string turnId, JsonArray messages)
     {
         var userId = RequireCurrentAdministrator();
         _logger.LogInformation("收到 SignalR AI 对话请求，ConnectionId: {ConnectionId}, UserId: {UserId}", Context.ConnectionId, userId);
 
         try
         {
-            await _aiService.ProcessChatAsync(
-                messages,
+            await _aiService.RunChatTurnAsync(
+                userId, turnId, messages,
                 async (chunk) =>
                 {
-                    await Clients.Caller.SendAsync("ChatChunk", chunk);
+                    await Clients.Caller.SendAsync("ChatChunk", chunk, turnId);
                 },
                 async (toolName, toolData) =>
                 {
-                    await Clients.Caller.SendAsync("ToolExecuted", toolName, toolData);
+                    await Clients.Caller.SendAsync("ToolExecuted", toolName, toolData, turnId);
                 },
-                userId
+                Context.ConnectionAborted
             );
 
             await Clients.Caller.SendAsync("ChatComplete");
@@ -45,7 +47,7 @@ public class AiChatHub : Hub
             _logger.LogError(ex, "SignalR AI 对话处理异常");
             try
             {
-                await Clients.Caller.SendAsync("ChatError", ex.Message);
+                await Clients.Caller.SendAsync("ChatError", ex.Message, turnId);
             }
             catch (Exception sendEx)
             {
@@ -56,17 +58,11 @@ public class AiChatHub : Hub
 
     public async Task<object> ConfirmToolAction(string confirmationId, bool approved)
     {
-        RequireCurrentAdministrator();
+        var userId = RequireCurrentAdministrator();
 
         try
         {
-            var (success, message, data) = await _aiService.ConfirmPendingToolAsync(
-                confirmationId,
-                approved,
-                async (toolName, toolData) =>
-                {
-                    await Clients.Caller.SendAsync("ToolExecuted", toolName, toolData);
-                });
+            var (success, message, data) = await _aiService.ConfirmPendingToolAsync(confirmationId, approved, userId);
 
             return new { success, message, data };
         }

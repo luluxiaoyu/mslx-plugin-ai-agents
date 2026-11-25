@@ -203,7 +203,7 @@ public partial class AiService
     }
 
     private async Task<string?> HandleResourcesToolAsync(string name, JsonObject? args, Func<string, object, Task> onToolExecuted,
-        bool assumeConfirmed, string userId, bool canPromptForConfirmation)
+        bool assumeConfirmed, string userId)
     {
         switch (name)
         {
@@ -214,22 +214,22 @@ public partial class AiService
                 return await HandleQueryResourceVersionsAsync(args, onToolExecuted);
 
             case "download_file_to_server":
-                return await HandleDownloadFileToServerAsync(args, onToolExecuted, userId);
+                return await HandleDownloadFileToServerAsync(args, onToolExecuted, userId, assumeConfirmed);
 
             case "audit_client_only_mods":
                 return await HandleAuditClientOnlyModsAsync(args, onToolExecuted);
 
             case "manage_mod_plugin_state":
-                return await HandleManageModPluginStateAsync(args, onToolExecuted, assumeConfirmed, canPromptForConfirmation);
+                return await HandleManageModPluginStateAsync(args, onToolExecuted, assumeConfirmed, userId);
 
             case "query_python_environments":
                 return await HandleQueryPythonEnvironmentsAsync(args, onToolExecuted);
 
             case "extract_archive":
-                return await HandleExtractArchiveAsync(args, onToolExecuted, userId);
+                return await HandleExtractArchiveAsync(args, onToolExecuted, userId, assumeConfirmed);
 
             case "compress_files":
-                return await HandleCompressFilesAsync(args, onToolExecuted, userId);
+                return await HandleCompressFilesAsync(args, onToolExecuted, userId, assumeConfirmed);
 
             default:
                 return null;
@@ -439,8 +439,10 @@ public partial class AiService
 
     #region 3. download_file_to_server
 
-    private async Task<string> HandleDownloadFileToServerAsync(JsonObject? args, Func<string, object, Task> onToolExecuted, string userId)
+    private async Task<string> HandleDownloadFileToServerAsync(JsonObject? args, Func<string, object, Task> onToolExecuted, string userId, bool assumeConfirmed)
     {
+        string? temporaryFile = null;
+        string? taskId = null;
         try
         {
             string url = args?["url"]?.ToString() ?? "";
@@ -512,8 +514,16 @@ public partial class AiService
 
             string displayRelPath = Path.GetRelativePath(safeBaseDir, finalFilePath);
 
+            if (!assumeConfirmed && File.Exists(finalFilePath))
+            {
+                // Freeze the selected name so approval executes the displayed destination.
+                args!["file_name"] = fileName;
+                return await RequestReplacementAsync("download_file_to_server", args.ToJsonString(),
+                    targetServer.ID, displayRelPath, userId, onToolExecuted);
+            }
+            temporaryFile = Path.Combine(targetDir, $".mslx-download-{Guid.NewGuid():N}.tmp");
+
             // 注册全局后台任务 (若任务管理器可用)
-            string? taskId = null;
             try
             {
                 if (MSLX.SDK.MSLX.Tasks != null)
@@ -540,7 +550,7 @@ public partial class AiService
             // 优先尝试使用 MSLX SDK 官方下载器服务
             if (MSLX.SDK.MSLX.Downloader != null)
             {
-                var dlResult = await MSLX.SDK.MSLX.Downloader.DownloadFileAsync(url, finalFilePath, (prog, speed) =>
+                var dlResult = await MSLX.SDK.MSLX.Downloader.DownloadFileAsync(url, temporaryFile, (prog, speed) =>
                 {
                     if (taskId != null)
                     {
@@ -557,7 +567,7 @@ public partial class AiService
                 response.EnsureSuccessStatusCode();
 
                 long totalBytes = response.Content.Headers.ContentLength ?? 0;
-                await using var fs = new FileStream(finalFilePath, FileMode.Create, FileAccess.Write, FileShare.None);
+                await using var fs = new FileStream(temporaryFile, FileMode.CreateNew, FileAccess.Write, FileShare.None);
                 await using var contentStream = await response.Content.ReadAsStreamAsync();
 
                 var buffer = new byte[81920];
@@ -577,6 +587,7 @@ public partial class AiService
 
             if (success)
             {
+                File.Move(temporaryFile, finalFilePath, overwrite: assumeConfirmed);
                 if (taskId != null)
                 {
                     MSLX.SDK.MSLX.Tasks?.SetSuccess(taskId, $"已成功下载至 {displayRelPath}");
@@ -586,7 +597,6 @@ public partial class AiService
                 var resultData = new
                 {
                     serverId = targetServer.ID,
-                    url,
                     fileName,
                     relativePath = displayRelPath,
                     size = FormatBytes(sizeBytes),
@@ -607,8 +617,13 @@ public partial class AiService
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "HandleDownloadFileToServerAsync 异常: {Message}", ex.Message);
+            if (taskId != null) MSLX.SDK.MSLX.Tasks?.SetFailed(taskId, "下载文件无法写入目标位置。");
+            _logger.LogError(ex, "下载文件失败");
             return $"[ERROR] 下载文件异常: {ex.Message}";
+        }
+        finally
+        {
+            if (temporaryFile != null) File.Delete(temporaryFile);
         }
     }
 
@@ -812,7 +827,7 @@ public partial class AiService
     #region 5. manage_mod_plugin_state
 
     private async Task<string> HandleManageModPluginStateAsync(JsonObject? args, Func<string, object, Task> onToolExecuted,
-        bool assumeConfirmed, bool canPromptForConfirmation)
+        bool assumeConfirmed, string userId)
     {
         try
         {
@@ -927,20 +942,24 @@ public partial class AiService
                 return $"[ERROR] 执行 `{action}` 操作时，必须提供 targets 目标文件列表。";
             }
 
+            if (targets.Any(target => target is "." or ".." || target.Contains('/') || target.Contains('\\') ||
+                target.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0))
+                return "[ERROR] 模组或插件目标必须是当前目录内的文件名。";
+
             // 2. DELETE 删除操作 (破坏性操作二次授权拦截)
             if (action == "delete")
             {
                 if (!assumeConfirmed)
                 {
-                    if (!canPromptForConfirmation) return WebPanelConfirmationRequired;
+
 
                     string targetSummary = string.Join(", ", targets);
-                    string confirmationId = CreateOrGetPendingOperation(
+                    string confirmationId = CreatePendingOperation(
                         "manage_mod_plugin_state",
                         args?.ToJsonString() ?? "{}",
                         targetServer.ID,
                         $"{folderType}/[{targetSummary}]",
-                        "delete");
+                        "delete", userId);
 
                     var confirmData = new
                     {
@@ -954,7 +973,7 @@ public partial class AiService
                     };
 
                     await onToolExecuted("manage_mod_plugin_state", confirmData);
-                    return $"[PENDING_CONFIRMATION] 高风险警告：准备从服务器 {targetServer.ID} 的 `{folderType}` 彻底删除模组/插件 [{targetSummary}]！操作已挂起，前端已弹出确认授权卡片，用户点击确认后将执行删除。";
+                    return PendingMessage(confirmationId);
                 }
 
                 // 用户已确认删除
@@ -1197,7 +1216,7 @@ public partial class AiService
 
     #region 7. extract_archive
 
-    private async Task<string> HandleExtractArchiveAsync(JsonObject? args, Func<string, object, Task> onToolExecuted, string userId)
+    private async Task<string> HandleExtractArchiveAsync(JsonObject? args, Func<string, object, Task> onToolExecuted, string userId, bool assumeConfirmed)
     {
         try
         {
@@ -1226,13 +1245,20 @@ public partial class AiService
                 return "[ERROR] 越权操作：解压目标目录超出服务器根路径。";
             }
 
-            Directory.CreateDirectory(extractTargetDir);
-
             bool overwrite = true;
             if (args != null && args.ContainsKey("overwrite") && bool.TryParse(args["overwrite"]?.ToString(), out bool ow))
             {
                 overwrite = ow;
             }
+
+            if (overwrite && !assumeConfirmed && Directory.Exists(extractTargetDir) &&
+                Directory.EnumerateFileSystemEntries(extractTargetDir).Any())
+                return await RequestReplacementAsync("extract_archive", args?.ToJsonString() ?? "{}",
+                    targetServer.ID, Path.GetRelativePath(safeBaseDir, extractTargetDir), userId, onToolExecuted);
+
+            Directory.CreateDirectory(extractTargetDir);
+            bool allowOverwrite = overwrite && assumeConfirmed;
+            Func<string, bool> isPathSafe = path => allowOverwrite || !File.Exists(path);
 
             string? password = args?["password"]?.ToString();
 
@@ -1288,7 +1314,7 @@ public partial class AiService
 
                             var taskResult = method.Invoke(archiveService, new object?[]
                             {
-                                fullArchivePath, extractTargetDir, null, password, CancellationToken.None, onProgress, null
+                                fullArchivePath, extractTargetDir, null, password, CancellationToken.None, onProgress, isPathSafe
                             });
 
                             if (taskResult is Task t)
@@ -1312,19 +1338,19 @@ public partial class AiService
                 {
                     if (fileNameLower.EndsWith(".zip") || fileNameLower.EndsWith(".jar"))
                     {
-                        ZipFile.ExtractToDirectory(fullArchivePath, extractTargetDir, overwrite);
+                        ZipFile.ExtractToDirectory(fullArchivePath, extractTargetDir, allowOverwrite);
                         extracted = true;
                     }
                     else if (fileNameLower.EndsWith(".tar.gz") || fileNameLower.EndsWith(".tgz"))
                     {
                         await using var fs = File.OpenRead(fullArchivePath);
                         await using var gz = new GZipStream(fs, CompressionMode.Decompress);
-                        await TarFile.ExtractToDirectoryAsync(gz, extractTargetDir, overwrite);
+                        await TarFile.ExtractToDirectoryAsync(gz, extractTargetDir, allowOverwrite);
                         extracted = true;
                     }
                     else if (fileNameLower.EndsWith(".tar"))
                     {
-                        await TarFile.ExtractToDirectoryAsync(fullArchivePath, extractTargetDir, overwrite);
+                        await TarFile.ExtractToDirectoryAsync(fullArchivePath, extractTargetDir, allowOverwrite);
                         extracted = true;
                     }
                     else
@@ -1376,8 +1402,10 @@ public partial class AiService
 
     #region 8. compress_files
 
-    private async Task<string> HandleCompressFilesAsync(JsonObject? args, Func<string, object, Task> onToolExecuted, string userId)
+    private async Task<string> HandleCompressFilesAsync(JsonObject? args, Func<string, object, Task> onToolExecuted, string userId, bool assumeConfirmed)
     {
+        string? temporaryFile = null;
+        string? taskId = null;
         try
         {
             var (targetServer, safeBaseDir, err) = ResolveServerAndBaseDir(args);
@@ -1451,8 +1479,12 @@ public partial class AiService
                 Directory.CreateDirectory(targetOutputDir);
             }
 
+            if (!assumeConfirmed && File.Exists(fullOutputPath))
+                return await RequestReplacementAsync("compress_files", args?.ToJsonString() ?? "{}",
+                    targetServer.ID, Path.GetRelativePath(safeBaseDir, fullOutputPath), userId, onToolExecuted);
+            temporaryFile = Path.Combine(targetOutputDir!, $".mslx-compress-{Guid.NewGuid():N}-{Path.GetFileName(fullOutputPath)}");
+
             // 注册全局后台任务
-            string? taskId = null;
             try
             {
                 if (MSLX.SDK.MSLX.Tasks != null)
@@ -1502,7 +1534,7 @@ public partial class AiService
 
                             var taskResult = method.Invoke(archiveService, new object?[]
                             {
-                                filesToCompress, fullOutputPath, null, CancellationToken.None, onProgress
+                                filesToCompress, temporaryFile, null, CancellationToken.None, onProgress
                             });
 
                             if (taskResult is Task t)
@@ -1524,12 +1556,9 @@ public partial class AiService
             {
                 try
                 {
-                    if (File.Exists(fullOutputPath))
-                    {
-                        File.Delete(fullOutputPath);
-                    }
+                    if (File.Exists(temporaryFile)) File.Delete(temporaryFile);
 
-                    await using (var zipFs = new FileStream(fullOutputPath, FileMode.Create, FileAccess.Write, FileShare.None))
+                    await using (var zipFs = new FileStream(temporaryFile, FileMode.CreateNew, FileAccess.Write, FileShare.None))
                     using (var zipArchive = new ZipArchive(zipFs, ZipArchiveMode.Create))
                     {
                         int current = 0;
@@ -1562,6 +1591,7 @@ public partial class AiService
 
             if (compressed)
             {
+                File.Move(temporaryFile, fullOutputPath, overwrite: assumeConfirmed);
                 if (taskId != null)
                 {
                     MSLX.SDK.MSLX.Tasks?.SetSuccess(taskId, "压缩打包完成");
@@ -1592,8 +1622,13 @@ public partial class AiService
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "HandleCompressFilesAsync 异常: {Message}", ex.Message);
+            if (taskId != null) MSLX.SDK.MSLX.Tasks?.SetFailed(taskId, "压缩结果无法写入目标位置。");
+            _logger.LogError(ex, "压缩文件失败");
             return $"[ERROR] 压缩文件异常: {ex.Message}";
+        }
+        finally
+        {
+            if (temporaryFile != null) File.Delete(temporaryFile);
         }
     }
 

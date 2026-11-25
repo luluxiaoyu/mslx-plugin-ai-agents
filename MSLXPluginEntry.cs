@@ -20,7 +20,7 @@ public class MSLXPluginEntry : IPlugin
     public string Id => "mslx-plugin-ai-agents";
     public string Name => "AI 助手";
     public string Description => "支持在线对话 & MCP 服务的 AI 助手插件，可让AI助手帮您操作 MSLX。";
-    public string Version => "1.0.3";
+    public string Version => "1.1.0";
     public string Icon => "f06867909c1984881489196158935cf0_3785578587551796133.png";
     public string MinSDKVersion => "1.7.9";
     public string Developer => "luluxiaoyu";
@@ -32,11 +32,10 @@ public class MSLXPluginEntry : IPlugin
     {
         Instance = this;
         ServiceProvider = serviceProvider;
-        string dataDir = this.Config().GetDataPath();
-        if (!Directory.Exists(dataDir))
-        {
-            Directory.CreateDirectory(dataDir);
-        }
+        // The host materializes an empty Config.json when its plugin bridge is first opened.
+        var dataDir = Path.Combine(SDK.MSLX.Config.GetAppDataPath(), "PluginsData", Id);
+        Directory.CreateDirectory(dataDir);
+        Utils.PluginData.MigrateLegacy(dataDir);
         SDK.MSLX.Logger.Info("mslx-plugin-ai-agents 初始化成功~");
     }
 
@@ -48,6 +47,9 @@ public class MSLXPluginEntry : IPlugin
     public void OnUnload()
     {
         McpController.CloseLegacySessions();
+        ServiceProvider?.GetService<AiService>()?.StopAllChatTurns();
+        ServiceProvider?.GetService<McpTokenManager>()?.Dispose();
+        ServiceProvider = null;
         SDK.MSLX.Logger.Info("mslx-plugin-ai-agents 卸载成功~");
     }
 

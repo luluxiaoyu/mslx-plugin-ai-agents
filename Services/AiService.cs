@@ -29,9 +29,6 @@ public partial class AiService
     private readonly IServiceProvider _serviceProvider;
     private readonly IMemoryCache _memoryCache;
     private readonly ILogger<AiService> _logger;
-    private readonly ConcurrentDictionary<string, PendingToolOperation> _pendingToolOperations = new();
-    private static readonly TimeSpan PendingOperationTtl = TimeSpan.FromMinutes(30);
-    private const string WebPanelConfirmationRequired = "[ERROR] 此操作需要在 MSLX WebPanel 的 AI 聊天中发起并确认。";
 
     public AiService(
         IInstanceLifecycleService lifecycleService,
@@ -54,21 +51,17 @@ public partial class AiService
         JsonArray messages,
         Func<string, Task> onChunkReceived,
         Func<string, object, Task> onToolExecuted,
-        string userId = "")
+        string userId, CancellationToken cancellationToken, Action<string, string, string?, string?> recordTool)
     {
         var configBridge = MSLX.SDK.MSLX.Config.GetPluginConfig("mslx-plugin-ai-agents");
         var config = configBridge.ReadConfig();
-        bool enabled = (bool?)(config["aiEnabled"]) ?? false;
         string apiKey = (string?)(config["aiApiKey"]) ?? "";
         string baseUrl = (string?)(config["aiBaseUrl"]) ?? "https://api.deepseek.com/v1";
         string modelName = (string?)(config["aiModelName"]) ?? "deepseek-chat";
         var systemPrompt = AiSkillManager.GetSystemPrompt();
 
-        if (!enabled || string.IsNullOrWhiteSpace(apiKey))
-        {
-            await onChunkReceived("⚠️ AI 助手尚未启用或未设置 API Key，请先前往系统的【AI 助手设置】中配置。");
-            return;
-        }
+        if (string.IsNullOrWhiteSpace(apiKey))
+            throw new InvalidOperationException("请在当前 AI 助手窗口打开模型设置，填写 API Key。");
 
         var requestUrl = $"{baseUrl.TrimEnd('/')}/chat/completions";
 
@@ -91,9 +84,38 @@ public partial class AiService
 
         var tools = GetToolsDefinition();
 
+        async Task<string> RunTool(string name, string args)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            string? taskId = null;
+            string? operationId = null;
+            bool submitted = false;
+            recordTool(name, "executing", null, null);
+            if (cancellationToken.IsCancellationRequested)
+            {
+                recordTool(name, "cancelled", null, null);
+                cancellationToken.ThrowIfCancellationRequested();
+            }
+            var result = await ExecuteToolAsync(name, args, async (tool, data) =>
+            {
+                var details = JsonSerializer.SerializeToElement(data);
+                taskId = McpRequest.GetString(details, "backgroundTaskId") ?? taskId;
+                operationId = McpRequest.GetString(details, "confirmationId") ?? operationId;
+                submitted |= McpRequest.GetString(details, "status") == "started";
+                if (!cancellationToken.IsCancellationRequested) await onToolExecuted(tool, data);
+            }, userId: userId);
+            var status = result.StartsWith("[ERROR]", StringComparison.Ordinal) ? "failed"
+                : operationId != null ? "pending" : submitted ? "submitted" : "succeeded";
+            recordTool(name, status, taskId, operationId);
+            if (!cancellationToken.IsCancellationRequested)
+                await onToolExecuted(name, new { outcome = status });
+            return result;
+        }
+
         int maxTurns = 15;
         while (maxTurns-- > 0)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             var payload = new JsonObject
             {
                 ["model"] = modelName,
@@ -112,17 +134,14 @@ public partial class AiService
 
             try
             {
-                using var response = await _httpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead);
+                using var response = await _httpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
 
                 if (!response.IsSuccessStatusCode)
                 {
-                    var responseContent = await response.Content.ReadAsStringAsync();
-                    _logger.LogError("调用大模型失败 HTTP {Status}: {Body}", response.StatusCode, responseContent);
-                    await onChunkReceived($"调用大模型失败 (HTTP {(int)response.StatusCode}): {responseContent}");
-                    return;
+                    throw new InvalidOperationException($"模型服务返回 HTTP {(int)response.StatusCode}，请检查模型配置。");
                 }
 
-                using var responseStream = await response.Content.ReadAsStreamAsync();
+                using var responseStream = await response.Content.ReadAsStreamAsync(cancellationToken);
                 using var reader = new StreamReader(responseStream, Encoding.UTF8);
 
                 var assistantMessage = new JsonObject { ["role"] = "assistant" };
@@ -133,7 +152,7 @@ public partial class AiService
                 int streamedLength = 0;
 
                 string? line;
-                while ((line = await reader.ReadLineAsync()) != null)
+                while ((line = await reader.ReadLineAsync(cancellationToken)) != null)
                 {
                     if (string.IsNullOrWhiteSpace(line) || !line.StartsWith("data:")) continue;
 
@@ -288,9 +307,7 @@ public partial class AiService
                         var functionName = functionObj?["name"]?.ToString() ?? "";
                         var argumentsStr = functionObj?["arguments"]?.ToString() ?? "{}";
 
-                        _logger.LogInformation("AI 触发 Tool Call: {Name}, Args: {Args}", functionName, argumentsStr);
-
-                        var toolResult = await ExecuteToolAsync(functionName, argumentsStr, onToolExecuted, userId: userId);
+                        var toolResult = await RunTool(functionName, argumentsStr);
 
                         reqMessages.Add(new JsonObject
                         {
@@ -325,16 +342,17 @@ public partial class AiService
                     await onToolExecuted("suggested_replies", suggestions);
                 }
 
-                await TryHandleDsmlTextToolCallsAsync(contentText, onToolExecuted, userId: userId);
-                break;
+                await TryHandleDsmlTextToolCallsAsync(contentText, RunTool);
+                cancellationToken.ThrowIfCancellationRequested();
+                return;
             }
-            catch (Exception ex)
+            catch (HttpRequestException ex)
             {
-                _logger.LogError(ex, "处理 AI 对话异常");
-                await onChunkReceived($"处理请求时发生异常: {ex.Message}");
-                break;
+                _logger.LogWarning(ex, "无法请求模型服务");
+                throw new InvalidOperationException("模型服务连接失败，请检查模型地址和网络。");
             }
         }
+        throw new InvalidOperationException("本轮已达到工具调用上限，请核对已执行的操作。");
     }
 
     private string GetJavaMajorVersion(string versionStr)
@@ -430,7 +448,7 @@ public partial class AiService
         }
     }
 
-    private async Task<string?> TryHandleDsmlTextToolCallsAsync(string contentText, Func<string, object, Task> onToolExecuted, string userId = "")
+    private async Task<string?> TryHandleDsmlTextToolCallsAsync(string contentText, Func<string, string, Task<string>> runTool)
     {
         if (string.IsNullOrWhiteSpace(contentText) || !contentText.Contains("<｜DSML｜invoke"))
         {
@@ -476,14 +494,13 @@ public partial class AiService
                     argsObj[mappedPName] = pval;
                 }
 
-                _logger.LogInformation("解析并拦截文本中的 DSML Tool Call: {Name}, Args: {Args}", toolName, argsObj.ToJsonString());
-                string toolResult = await ExecuteToolAsync(toolName, argsObj.ToJsonString(), onToolExecuted, userId: userId);
+                string toolResult = await runTool(toolName, argsObj.ToJsonString());
 
                 string cleanText = Regex.Replace(contentText, @"<｜DSML｜tool_calls[\s\S]*?</｜DSML｜tool_calls>", "").Trim();
                 return string.IsNullOrWhiteSpace(cleanText) ? toolResult : $"{cleanText}\n\n{toolResult}";
             }
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             _logger.LogError(ex, "解析 DSML 文本标签失败");
         }
@@ -491,9 +508,9 @@ public partial class AiService
         return null;
     }
 
-    public Task<string> ExecuteToolAsync(string name, string argsJson, bool assumeConfirmed = false, string userId = "mcp")
+    internal Task<string> ExecuteMcpToolAsync(string name, string argsJson, string tokenId)
     {
-        return ExecuteToolAsync(name, argsJson, (_, _) => Task.CompletedTask, assumeConfirmed, userId, canPromptForConfirmation: false);
+        return ExecuteToolAsync(name, argsJson, (_, _) => Task.CompletedTask, userId: $"mcp:{tokenId}");
     }
 
     public List<McpToolDefinition> GetMcpToolDefinitions()
@@ -528,6 +545,17 @@ public partial class AiService
                 });
             }
         }
+        list.Add(new McpToolDefinition
+        {
+            Name = "query_operation_status",
+            Description = "查询当前访问令牌提交的待审批操作或执行结果。通过原工具返回的操作编号查询。",
+            InputSchema = JsonSerializer.SerializeToElement(new
+            {
+                type = "object",
+                properties = new { operation_id = new { type = "string" } },
+                required = new[] { "operation_id" }
+            })
+        });
         return list;
     }
 
@@ -922,7 +950,7 @@ public partial class AiService
     }
 
     private async Task<string> ExecuteToolAsync(string name, string argsJson, Func<string, object, Task> onToolExecuted,
-        bool assumeConfirmed = false, string userId = "", bool canPromptForConfirmation = true)
+        bool assumeConfirmed = false, string userId = "")
     {
         try
         {
@@ -1565,14 +1593,19 @@ public partial class AiService
                         version = version,
                         recommendedJavaMajor = recJavaMajor,
                         java = selectedJava,
-                        status = finalStatus?.Message ?? "部署完成",
-                        progress = finalStatus?.Progress ?? 100
+                        status = finalStatus?.Message ?? "started",
+                        backgroundTaskId = bgTaskId,
+                        progress = finalStatus?.Progress ?? 0
                     };
                     await onToolExecuted("create_mc_server", resData);
 
                     if (isFailure)
                     {
                         return $"[ERROR] 服务器 (ID: {serverId}) 后台部署失败: {finalStatus?.Message ?? "部署过程发生错误"}";
+                    }
+                    else if (!isSuccess)
+                    {
+                        return $"[INFO] 服务器 (ID: {serverId}) 的部署仍在后台运行，请使用 query_creation_status 查询进度。";
                     }
                     else
                     {
@@ -1688,12 +1721,12 @@ public partial class AiService
                     bool exists = File.Exists(targetFilePath);
                     if (exists && !isConfirmed)
                     {
-                        if (!canPromptForConfirmation) return WebPanelConfirmationRequired;
 
-                        string confirmationId = CreateOrGetPendingOperation("write_server_file", argsJson, targetServer.ID, filePath, "edit");
-                        var needConfirmData = new { serverId = targetServer.ID, filePath = filePath, action = "edit", requiresConfirmation = true, confirmed = false, confirmationId = confirmationId, content = content };
+
+                        string confirmationId = CreatePendingOperation("write_server_file", argsJson, targetServer.ID, filePath, "edit", userId);
+                        var needConfirmData = new { serverId = targetServer.ID, filePath = filePath, action = "edit", requiresConfirmation = true, confirmed = false, confirmationId = confirmationId, contentLength = content.Length };
                         await onToolExecuted("write_server_file", needConfirmData);
-                        return $"[PENDING_CONFIRMATION] 警告：准备覆盖编辑已有文件 `{filePath}`。操作已挂起，前端已弹出确认按钮，用户点击确认授权后系统将自动执行写入，无需再次调用工具。";
+                        return PendingMessage(confirmationId);
                     }
 
                     string? parentDir = Path.GetDirectoryName(targetFilePath);
@@ -1702,7 +1735,10 @@ public partial class AiService
                         Directory.CreateDirectory(parentDir);
                     }
 
-                    await File.WriteAllTextAsync(targetFilePath, content);
+                    await using (var stream = new FileStream(targetFilePath,
+                        isConfirmed ? FileMode.Truncate : FileMode.CreateNew, FileAccess.Write))
+                    await using (var writer = new StreamWriter(stream))
+                        await writer.WriteAsync(content);
                     var writeResult = new { serverId = targetServer.ID, filePath = filePath, contentLength = content.Length, confirmed = true };
                     await onToolExecuted("write_server_file", writeResult);
                     return $"[SUCCESS] 成功写入/更新服务器 {targetServer.ID} 的文件 `{filePath}`！";
@@ -1742,19 +1778,20 @@ public partial class AiService
                     string safeBaseDir = Path.GetFullPath(serverDir);
                     string targetPath = Path.GetFullPath(Path.Combine(safeBaseDir, filePath));
 
-                    if (!IsWithinServerDirectory(safeBaseDir, targetPath))
+                    if (!IsWithinServerDirectory(safeBaseDir, targetPath) ||
+                        Path.GetRelativePath(safeBaseDir, targetPath) == ".")
                     {
-                        return "[ERROR] 越权操作：不允许删除服务器实例目录之外的文件。";
+                        return "[ERROR] 请选择实例内的文件或目录。删除整个实例请使用实例删除工具。";
                     }
 
                     if (!isConfirmed)
                     {
-                        if (!canPromptForConfirmation) return WebPanelConfirmationRequired;
 
-                        string confirmationId = CreateOrGetPendingOperation("delete_server_file", argsJson, targetServer.ID, filePath, "delete");
+
+                        string confirmationId = CreatePendingOperation("delete_server_file", argsJson, targetServer.ID, filePath, "delete", userId);
                         var confirmData = new { serverId = targetServer.ID, filePath = filePath, action = "delete", requiresConfirmation = true, confirmed = false, confirmationId = confirmationId };
                         await onToolExecuted("delete_server_file", confirmData);
-                        return $"[PENDING_CONFIRMATION] 高风险警告：已申请删除服务器文件/目录 `{filePath}`！操作已挂起，前端已弹出确认按钮，用户点击确认授权后系统将自动执行删除，无需再次调用工具。";
+                        return PendingMessage(confirmationId);
                     }
 
                     if (File.Exists(targetPath))
@@ -2031,17 +2068,20 @@ public partial class AiService
                         !IsWithinServerDirectory(serverDir, dstPath))
                         return "[ERROR] 越权访问：文件路径超出目标服务器根目录。";
 
+                    if (!assumeConfirmed && (File.Exists(dstPath) || Directory.Exists(dstPath)))
+                        return await RequestReplacementAsync("copy_server_file", argsJson, targetServer.ID, dstRel, userId, onToolExecuted);
+
                     if (File.Exists(srcPath))
                     {
                         Directory.CreateDirectory(Path.GetDirectoryName(dstPath)!);
-                        File.Copy(srcPath, dstPath, overwrite: true);
+                        File.Copy(srcPath, dstPath, overwrite: assumeConfirmed);
                         var resData = new { action = "copy", source = srcRel, destination = dstRel };
                         await onToolExecuted("copy_server_file", resData);
                         return $"[SUCCESS] 成功复制文件: {srcRel} ➔ {dstRel}";
                     }
                     else if (Directory.Exists(srcPath))
                     {
-                        CopyDirectoryRecursively(srcPath, dstPath);
+                        CopyDirectoryRecursively(srcPath, dstPath, assumeConfirmed);
                         var resData = new { action = "copy_dir", source = srcRel, destination = dstRel };
                         await onToolExecuted("copy_server_file", resData);
                         return $"[SUCCESS] 成功复制目录: {srcRel} ➔ {dstRel}";
@@ -2081,18 +2121,20 @@ public partial class AiService
                         !IsWithinServerDirectory(serverDir, dstPath))
                         return "[ERROR] 越权访问：文件路径超出目标服务器根目录。";
 
+                    if (!assumeConfirmed && (File.Exists(dstPath) || Directory.Exists(dstPath)))
+                        return await RequestReplacementAsync("move_server_file", argsJson, targetServer.ID, dstRel, userId, onToolExecuted);
+
                     if (File.Exists(srcPath))
                     {
                         Directory.CreateDirectory(Path.GetDirectoryName(dstPath)!);
-                        if (File.Exists(dstPath)) File.Delete(dstPath);
-                        File.Move(srcPath, dstPath);
+                        File.Move(srcPath, dstPath, overwrite: assumeConfirmed);
                         var resData = new { action = "move", source = srcRel, destination = dstRel };
                         await onToolExecuted("move_server_file", resData);
                         return $"[SUCCESS] 成功移动/重命名文件: {srcRel} ➔ {dstRel}";
                     }
                     else if (Directory.Exists(srcPath))
                     {
-                        if (Directory.Exists(dstPath)) Directory.Delete(dstPath, true);
+                        if (assumeConfirmed && Directory.Exists(dstPath)) Directory.Delete(dstPath, true);
                         Directory.Move(srcPath, dstPath);
                         var resData = new { action = "move_dir", source = srcRel, destination = dstRel };
                         await onToolExecuted("move_server_file", resData);
@@ -2219,11 +2261,11 @@ public partial class AiService
 
                 default:
                 {
-                    var opsRes = await HandleOpsToolAsync(name, args, onToolExecuted, assumeConfirmed, userId, canPromptForConfirmation);
+                    var opsRes = await HandleOpsToolAsync(name, args, onToolExecuted, assumeConfirmed, userId);
                     if (opsRes != null) return opsRes;
-                    var backupRes = await HandleBackupFrpToolAsync(name, args, onToolExecuted, assumeConfirmed, userId, canPromptForConfirmation);
+                    var backupRes = await HandleBackupFrpToolAsync(name, args, onToolExecuted, assumeConfirmed, userId);
                     if (backupRes != null) return backupRes;
-                    var resRes = await HandleResourcesToolAsync(name, args, onToolExecuted, assumeConfirmed, userId, canPromptForConfirmation);
+                    var resRes = await HandleResourcesToolAsync(name, args, onToolExecuted, assumeConfirmed, userId);
                     if (resRes != null) return resRes;
 
                     return $"[ERROR] 未找到工具处理逻辑 {name}";
@@ -2481,97 +2523,18 @@ public partial class AiService
         return string.Equals(path, root, comparison) || path.StartsWith(directoryPrefix, comparison);
     }
 
-    private string CreateOrGetPendingOperation(string toolName, string argsJson, int serverId, string filePath, string action)
-    {
-        PurgeExpiredPendingOperations();
-
-        var existing = _pendingToolOperations.Values.FirstOrDefault(p =>
-            p.ToolName == toolName &&
-            p.ServerId == serverId &&
-            string.Equals(p.FilePath, filePath, StringComparison.OrdinalIgnoreCase));
-
-        if (existing != null)
-        {
-            return existing.Id;
-        }
-
-        var pending = new PendingToolOperation
-        {
-            Id = Guid.NewGuid().ToString("N"),
-            ToolName = toolName,
-            ArgsJson = argsJson,
-            ServerId = serverId,
-            FilePath = filePath,
-            Action = action,
-            CreatedAt = DateTime.UtcNow
-        };
-        _pendingToolOperations[pending.Id] = pending;
-        return pending.Id;
-    }
-
-    private void PurgeExpiredPendingOperations()
-    {
-        var cutoff = DateTime.UtcNow - PendingOperationTtl;
-        foreach (var kvp in _pendingToolOperations)
-        {
-            if (kvp.Value.CreatedAt < cutoff)
-            {
-                _pendingToolOperations.TryRemove(kvp.Key, out _);
-            }
-        }
-    }
-
-    public async Task<(bool Success, string Message, object? Data)> ConfirmPendingToolAsync(
-        string confirmationId,
-        bool approved,
-        Func<string, object, Task> onToolExecuted,
-        string userId = "")
-    {
-        if (string.IsNullOrWhiteSpace(confirmationId) || !_pendingToolOperations.TryRemove(confirmationId, out var pending))
-        {
-            return (false, "确认凭证无效或已过期，请重新发起操作。", null);
-        }
-
-        if (!approved)
-        {
-            await onToolExecuted(pending.ToolName, new
-            {
-                serverId = pending.ServerId,
-                filePath = pending.FilePath,
-                action = pending.Action,
-                confirmed = false,
-                rejected = true
-            });
-            return (true, $"已拒绝{(pending.Action == "delete" ? "删除" : "覆盖写入")} `{pending.FilePath}`，操作已取消。", new { confirmed = false, rejected = true });
-        }
-
-        string result = await ExecuteToolAsync(pending.ToolName, pending.ArgsJson, onToolExecuted, assumeConfirmed: true, userId: userId);
-        return (true, result, new { confirmed = true });
-    }
-
-    private static void CopyDirectoryRecursively(string sourceDir, string targetDir)
+    private static void CopyDirectoryRecursively(string sourceDir, string targetDir, bool overwrite)
     {
         Directory.CreateDirectory(targetDir);
         foreach (var file in Directory.GetFiles(sourceDir))
         {
             string dest = Path.Combine(targetDir, Path.GetFileName(file));
-            File.Copy(file, dest, overwrite: true);
+            File.Copy(file, dest, overwrite);
         }
         foreach (var dir in Directory.GetDirectories(sourceDir))
         {
             string dest = Path.Combine(targetDir, Path.GetFileName(dir));
-            CopyDirectoryRecursively(dir, dest);
+            CopyDirectoryRecursively(dir, dest, overwrite);
         }
     }
-}
-
-internal sealed class PendingToolOperation
-{
-    public required string Id { get; init; }
-    public required string ToolName { get; init; }
-    public required string ArgsJson { get; init; }
-    public required int ServerId { get; init; }
-    public required string FilePath { get; init; }
-    public required string Action { get; init; }
-    public required DateTime CreatedAt { get; init; }
 }

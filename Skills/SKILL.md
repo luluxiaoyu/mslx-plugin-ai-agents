@@ -42,4 +42,4 @@ description: Comprehensive Minecraft server lifecycle, instance management, play
 - 用 `manage_mod_plugin_state` 列出、启用或禁用模组和插件。通过 `folder_type` 选择 `mods` 或 `plugins`。
 - 用 `query_frp_status` 查看隧道。用 `control_frp_tunnel` 启停指定隧道或读取日志。
 
-外部 MCP 客户端遇到需要 WebPanel 确认的操作时，应请用户在 WebPanel 发起并确认。
+外部 Agent 提交需要确认的操作后会收到操作编号。请管理员打开当前节点 MCP 页的「待确认操作」核对并处理，再用 `query_operation_status` 查询结果。

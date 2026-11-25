@@ -1,16 +1,13 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, ref, watch } from 'vue';
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { MessagePlugin } from 'tdesign-vue-next';
 import { AddIcon, BrowseIcon, CopyIcon, RefreshIcon } from 'tdesign-icons-vue-next';
-import {
-  createMcpToken,
-  getMcpEndpointUrls,
-  getMcpTokens,
-  revokeMcpToken,
-  type McpTokenModel,
-} from '../api/aiApi';
+import { useAiApi, statusLabels, type McpTokenModel, type ToolApproval } from '../api/aiApi';
 
+const { createMcpToken, getMcpEndpointUrls, getMcpTokens, revokeMcpToken, getInstances,
+  listApprovals, confirmAiToolAction } = useAiApi();
 const endpoints = getMcpEndpointUrls();
+const permissionWarning = '拿到这把钥匙的人可以管理当前节点上的服务器，请只交给你信任的 AI 软件。';
 const transport = ref<'http' | 'sse'>('http');
 const endpoint = computed(() => transport.value === 'http' ? endpoints.streamableHttpUrl : endpoints.sseUrl);
 const transportLabel = computed(() => transport.value === 'http' ? 'Streamable HTTP' : 'SSE');
@@ -57,6 +54,7 @@ const tokenOptions = computed(() => usableTokens.value.map((token) => ({
   label: `${token.name} · ${maskedToken(token).slice(-4)}`,
   value: token.id,
 })));
+const connectedLabel = computed(() => selectedToken.value?.connectedAt ? '已连接，AI 已成功读取工具列表。' : '等待 AI 首次读取工具列表。');
 const tokenPlaceholder = computed(() => tokensLoading.value ? '加载中…' : '暂无可用令牌');
 
 function formatExpiration(expiresAt: string | null) {
@@ -88,6 +86,7 @@ function buildPromptDetails(token: string) {
   return `MCP 连接方式：${transportLabel.value}
 服务地址：${endpoint.value}
 请求头：Authorization: Bearer ${token}
+${selectedToken.value?.serverIds ? `仅查询已授权的实例 ID：${selectedToken.value.serverIds.join('、')}` : ''}
 运维指南：${endpoints.skillMdUrl}
 
 如果你不能直接连接这个服务，请告诉我该在哪里添加，以及下一步怎么做。`;
@@ -142,8 +141,7 @@ function getCurrentToken() {
     selectedTokenId.value = '';
     tokens.value = [...tokens.value];
     selectUsableToken();
-    MessagePlugin.warning('连接钥匙已过期，请再点一次按钮');
-    return null;
+    return selectedToken.value;
   }
   return token;
 }
@@ -171,6 +169,23 @@ const expirationOptions = [
   { label: '180 天', value: 180 },
   { label: '永久有效', value: 0 },
 ];
+const readOnly = ref(false);
+const restrictInstances = ref(false);
+const serverIds = ref<number[]>([]);
+const instanceOptions = ref<{ label: string; value: number }[]>([]);
+const loadingInstances = ref(false);
+watch(restrictInstances, async (restricted) => {
+  if (!restricted) return;
+  loadingInstances.value = true;
+  try {
+    instanceOptions.value = (await getInstances()).map(({ id, name }) => ({ value: id, label: `#${id} ${name}` }));
+  } catch {
+    createError.value = '无法读取实例列表，请取消并重新开启实例限制。';
+  } finally {
+    loadingInstances.value = false;
+  }
+});
+
 const nameError = ref('');
 const createError = ref('');
 
@@ -178,8 +193,8 @@ watch([selectedTokenId, transport], () => {
   promptCopied.value = false;
 });
 
-async function addToken(name: string, expireDays: number) {
-  const token = await createMcpToken({ name, expireDays });
+async function addToken(name: string, expireDays: number, readOnly = false, serverIds: number[] | null = null) {
+  const token = await createMcpToken({ name, expireDays, readOnly, serverIds });
   if (!token?.id || !token.token) throw new Error('没有收到连接钥匙，请刷新后重试');
   tokens.value = [token, ...tokens.value.filter((item) => item.id !== token.id)];
   selectedTokenId.value = token.id;
@@ -205,8 +220,9 @@ async function handleQuickConnect() {
 
   creating.value = true;
   try {
-    await addToken('AI 助手接入', 30);
-    MessagePlugin.success('钥匙准备好了，现在可以复制这段话');
+    const created = await addToken('AI 助手接入', 30);
+    promptCopied.value = await copyText(`${presetText}\n\n${buildPromptDetails(created.token)}`, '这段话');
+    if (!promptCopied.value) quickError.value = '钥匙已准备好。请再点「复制这段话」。';
   } catch {
     quickError.value = '钥匙没生成成功，请再试一次。';
   } finally {
@@ -239,6 +255,9 @@ function openCreate(event: MouseEvent) {
   dialogTrigger = event.currentTarget as HTMLElement;
   name.value = '';
   expireDays.value = 30;
+  readOnly.value = false;
+  restrictInstances.value = false;
+  serverIds.value = [];
   nameError.value = '';
   createError.value = '';
   createdToken.value = null;
@@ -264,7 +283,11 @@ async function createToken() {
   creating.value = true;
   createError.value = '';
   try {
-    createdToken.value = await addToken(trimmedName, expireDays.value);
+    if (restrictInstances.value && !serverIds.value.length) {
+      createError.value = "请至少选择一个实例。";
+      return;
+    }
+    createdToken.value = await addToken(trimmedName, expireDays.value, readOnly.value, restrictInstances.value ? serverIds.value : null);
     await nextTick();
     createHeading.value?.focus();
   } catch (error) {
@@ -275,11 +298,13 @@ async function createToken() {
 }
 
 const revokeOpen = ref(false);
+const permanentDelete = ref(false);
 const revokeTarget = ref<McpTokenModel | null>(null);
 const revoking = ref(false);
 const revokeError = ref('');
 
-function openRevoke(token: McpTokenModel, event: MouseEvent) {
+function openRevoke(token: McpTokenModel, event: MouseEvent, permanent = false) {
+  permanentDelete.value = permanent;
   dialogTrigger = event.currentTarget as HTMLElement;
   revokeTarget.value = token;
   revokeError.value = '';
@@ -293,11 +318,12 @@ async function revokeToken() {
   revoking.value = true;
   revokeError.value = '';
   try {
-    await revokeMcpToken(token.id);
-    tokens.value = tokens.value.map((item) => item.id === token.id ? { ...item, isRevoked: true } : item);
+    await revokeMcpToken(token.id, permanentDelete.value);
+    tokens.value = permanentDelete.value ? tokens.value.filter((item) => item.id !== token.id)
+      : tokens.value.map((item) => item.id === token.id ? { ...item, isRevoked: true } : item);
     selectUsableToken();
     revokeOpen.value = false;
-    MessagePlugin.success(`已吊销令牌“${token.name}”`);
+    MessagePlugin.success(permanentDelete.value ? "已永久删除令牌。" : "已吊销令牌。");
   } catch (error) {
     revokeError.value = error instanceof Error ? error.message : '吊销失败，请重试';
   } finally {
@@ -305,14 +331,61 @@ async function revokeToken() {
   }
 }
 
-onMounted(loadTokens);
+const approvals = ref<ToolApproval[]>([]);
+const approvalsLoading = ref(false);
+const approvalsError = ref('');
+const activeDecision = ref('');
+const pendingCount = computed(() => approvals.value.filter(operation => operation.status === 'pending').length);
+const approvalLabels: Record<string, string> = {
+  write_server_file: '覆盖文件', delete_server_file: '删除文件或目录', delete_server_instance: '删除实例',
+  copy_server_file: '复制并覆盖目标', move_server_file: '移动并覆盖目标',
+  download_file_to_server: '下载并覆盖文件', compress_files: '覆盖压缩包', extract_archive: '解压并覆盖目录内容',
+  manage_mod_plugin_state: '删除模组或插件', restore_server_backup: '还原备份', delete_server_backup: '删除备份',
+};
+async function loadApprovals() {
+  if (approvalsLoading.value) return;
+  approvalsLoading.value = true;
+  try {
+    approvals.value = await listApprovals();
+    approvalsError.value = '';
+  } catch {
+    approvalsError.value = '无法获取操作，请刷新重试。';
+  } finally {
+    approvalsLoading.value = false;
+  }
+}
+
+async function decide(operation: ToolApproval, approved: boolean) {
+  if (activeDecision.value) return;
+  activeDecision.value = operation.id;
+  try {
+    const result = await confirmAiToolAction(operation.id, approved);
+    if (result.success) MessagePlugin.success(approved ? '操作已执行。' : '已拒绝操作。');
+    else MessagePlugin.error(result.message);
+  } catch {
+    MessagePlugin.error('无法获取执行结果，请刷新操作列表。');
+  } finally {
+    activeDecision.value = '';
+    await loadApprovals();
+  }
+}
+
+let approvalTimer: number | undefined;
+onMounted(() => {
+  void loadTokens();
+  void loadApprovals();
+  approvalTimer = window.setInterval(() => {
+    if (document.visibilityState === 'visible') void loadApprovals();
+  }, 10000);
+});
+onBeforeUnmount(() => window.clearInterval(approvalTimer));
 </script>
 
 <template>
   <div class="mcp-management">
     <section class="mcp-section" aria-labelledby="mcp-quick-heading">
       <div class="section-header">
-        <h2 id="mcp-quick-heading">让 AI 帮你查看服务器</h2>
+        <div><h2 id="mcp-quick-heading">让 AI 帮你查看服务器</h2><p>当前节点 · {{ endpoints.nodeName }}</p></div>
       </div>
       <ol class="quick-steps">
         <li>
@@ -339,11 +412,16 @@ onMounted(loadTokens);
           <h3>复制这段话</h3>
           <div class="preset">
             <p>{{ presetText }}</p>
+            <p v-if="!selectedToken?.readOnly" class="config-note">{{ permissionWarning }}</p>
             <details class="preview-details prompt-preview">
               <summary>查看完整内容</summary>
               <pre class="config-code" translate="no"><code>{{ promptDetailsPreview }}</code></pre>
               <p v-if="selectedToken" class="prompt-token-hint">复制时会填入所选令牌的完整值。</p>
             </details>
+            <div v-if="selectedToken" class="preset-actions">
+              <span class="config-note" role="status">{{ connectedLabel }}</span>
+              <t-button variant="text" size="small" :loading="tokensLoading" @click="loadTokens">刷新连接状态</t-button>
+            </div>
             <div class="preset-actions">
               <label class="mcp-field">
                 <span>访问令牌</span>
@@ -367,13 +445,13 @@ onMounted(loadTokens);
                   <AddIcon v-else-if="!loadError" aria-hidden="true" />
                   <RefreshIcon v-else aria-hidden="true" />
                 </template>
-                {{ tokensLoading ? '正在准备…' : selectedToken ? '复制这段话' : loadError ? '重新加载' : '先生成连接钥匙' }}
+                {{ tokensLoading ? '正在准备…' : selectedToken ? '复制这段话' : loadError ? '重新加载' : '生成钥匙并复制' }}
               </t-button>
             </div>
           </div>
           <p v-if="quickError" class="field-error" role="alert">{{ quickError }}</p>
           <p v-else-if="!tokensLoading && !selectedToken">
-            {{ loadError ? '连接钥匙没加载出来，请点「重新加载」。' : '第一次使用先点按钮生成钥匙，然后再复制。' }}
+            {{ loadError ? '连接钥匙没加载出来，请点「重新加载」。' : '第一次使用，点一次就能生成钥匙并复制。' }}
           </p>
         </li>
         <li>
@@ -382,6 +460,44 @@ onMounted(loadTokens);
         </li>
       </ol>
     </section>
+
+    <details class="advanced-settings">
+      <summary>待确认操作<span v-if="pendingCount"> · {{ pendingCount }} 项</span></summary>
+      <section class="advanced-content" aria-label="待确认操作">
+        <div class="section-header">
+          <p>AI 申请删除或覆盖内容时，会在这里等你确认。</p>
+          <t-button variant="outline" size="small" :loading="approvalsLoading" @click="loadApprovals">刷新</t-button>
+        </div>
+        <p v-if="approvalsError" class="field-error" role="alert">{{ approvalsError }}</p>
+        <p v-else-if="!approvals.length" class="empty-state" role="status">暂时没有操作记录。</p>
+        <ul v-else class="token-list">
+          <li v-for="operation in approvals" :key="operation.id" class="token-row">
+            <div class="token-details">
+              <div class="token-heading">
+                <strong>{{ approvalLabels[operation.tool] || operation.tool }}</strong>
+                <t-tag size="small" variant="light" :theme="operation.status === 'pending' ? 'warning' : 'default'">
+                  {{ statusLabels[operation.status] || operation.status }}
+                </t-tag>
+              </div>
+              <div class="token-meta">
+                <span>#{{ operation.serverId }} {{ operation.serverName }}</span>
+                <span>{{ operation.target }}</span>
+                <code :title="operation.id">编号 {{ operation.id }}</code>
+                <span>{{ operation.source === 'mcp' ? operation.requester : '面板聊天' }}</span>
+                <span v-if="operation.action === 'delete_data'">同时删除文件和存档</span>
+                <span v-if="operation.action === 'remove_instance'">移除实例配置，保留文件</span>
+                <span v-if="operation.approver">审批人 {{ operation.approver }}</span>
+                <span v-if="operation.status === 'pending'">{{ formatExpiration(operation.expiresAt) }}</span>
+              </div>
+            </div>
+            <div v-if="operation.status === 'pending'" class="token-actions">
+              <t-button theme="danger" size="small" :disabled="!!activeDecision" @click="decide(operation, true)">确认执行</t-button>
+              <t-button variant="outline" size="small" :disabled="!!activeDecision" @click="decide(operation, false)">拒绝</t-button>
+            </div>
+          </li>
+        </ul>
+      </section>
+    </details>
 
     <details class="advanced-settings">
       <summary>高级设置</summary>
@@ -487,9 +603,12 @@ onMounted(loadTokens);
                 <div class="token-meta">
                   <code translate="no">{{ maskedToken(token) }}</code>
                   <span>{{ formatExpiration(token.expiresAt) }}</span>
+                  <span>{{ token.readOnly ? '只读' : '全部权限' }}</span>
+                  <span>{{ token.serverIds ? `实例 #${token.serverIds.join('、#')}` : '全部实例' }}</span>
+                  <span>最近使用 {{ token.lastUsedAt ? dateTime.format(Date.parse(token.lastUsedAt)) : '暂无' }}</span>
                 </div>
               </div>
-              <div v-if="!token.isRevoked" class="token-actions">
+              <div class="token-actions">
                 <t-button
                   v-if="token.token && tokenStatus(token).theme === 'success'"
                   variant="text"
@@ -504,10 +623,14 @@ onMounted(loadTokens);
                   size="small"
                   theme="danger"
                   :disabled="tokensLoading"
+                  v-if="tokenStatus(token).theme === 'success'"
                   :aria-label="`吊销令牌 ${token.name}`"
                   @click="openRevoke(token, $event)"
                 >
                   吊销
+                </t-button>
+                <t-button v-else variant="text" theme="danger" size="small" @click="openRevoke(token, $event, true)">
+                  永久删除
                 </t-button>
               </div>
             </li>
@@ -550,6 +673,7 @@ onMounted(loadTokens);
         </div>
       </div>
       <form v-else class="mcp-dialog-content" novalidate @submit.prevent="createToken">
+        <p v-if="!readOnly" class="config-note">{{ permissionWarning }}</p>
         <label class="mcp-field">
           <span>令牌名称</span>
           <input
@@ -579,6 +703,17 @@ onMounted(loadTokens);
             :disabled="creating"
           />
         </label>
+        <details>
+          <summary>限制令牌权限</summary>
+          <div class="mcp-dialog-content">
+            <t-checkbox v-model="readOnly" :disabled="creating">只允许查看</t-checkbox>
+            <t-checkbox v-model="restrictInstances" :disabled="creating">只允许访问选定实例</t-checkbox>
+            <label v-if="restrictInstances" class="mcp-field">
+              <span>可访问实例</span>
+              <t-select v-model="serverIds" :options="instanceOptions" multiple :loading="loadingInstances" :disabled="creating" />
+            </label>
+          </div>
+        </details>
         <p v-if="createError" class="field-error" role="alert">{{ createError }}</p>
       </form>
     </t-dialog>
@@ -594,7 +729,7 @@ onMounted(loadTokens);
       :close-on-overlay-click="false"
       :close-on-esc-keydown="!revoking"
       :close-btn="false"
-      :confirm-btn="{ content: '吊销令牌', theme: 'danger', loading: revoking }"
+      :confirm-btn="{ content: permanentDelete ? '永久删除' : '吊销令牌', theme: 'danger', loading: revoking }"
       :cancel-btn="revoking ? null : '取消'"
       @keydown.tab="keepDialogFocus"
       @opened="revokeHeading?.focus()"
@@ -602,10 +737,11 @@ onMounted(loadTokens);
       @confirm="revokeToken"
     >
       <template #header>
-        <h2 id="mcp-revoke-title" ref="revokeHeading" class="mcp-dialog-title" tabindex="-1">吊销访问令牌</h2>
+        <h2 id="mcp-revoke-title" ref="revokeHeading" class="mcp-dialog-title" tabindex="-1">{{ permanentDelete ? "永久删除访问令牌" : "吊销访问令牌" }}</h2>
       </template>
       <div class="mcp-dialog-content">
-        <p>使用“{{ revokeTarget?.name }}”的客户端将立即失去 MCP 访问权限。</p>
+        <p v-if="permanentDelete">从列表永久删除“{{ revokeTarget?.name }}”。</p>
+        <p v-else>使用“{{ revokeTarget?.name }}”的客户端将立即失去 MCP 访问权限。</p>
         <p v-if="revokeError" class="field-error" role="alert">{{ revokeError }}</p>
       </div>
     </t-dialog>

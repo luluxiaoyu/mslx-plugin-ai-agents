@@ -156,6 +156,8 @@ public class McpController(
                 McpError.InvalidRequest($"Unsupported {ProtocolVersionHeader}")), StatusCodes.Status400BadRequest);
         }
 
+        if (!tokenManager.MarkUsed(token!, toolListRead: false)) return UnauthorizedMcp();
+
         JsonDocument document;
         try
         {
@@ -233,7 +235,9 @@ public class McpController(
                 if (request.Params is { } parameters && parameters.TryGetProperty("cursor", out _))
                     return McpResponse.Fail(request.Id, McpError.InvalidParams("Invalid tools/list cursor."));
 
-                return McpResponse.Success(request.Id, new { tools = aiService.GetMcpToolDefinitions() });
+                var visibleTools = aiService.GetMcpToolDefinitions().Where(tool => McpToolPermissions.AllowsTool(token, tool)).ToArray();
+                tokenManager.MarkUsed(token, toolListRead: true);
+                return McpResponse.Success(request.Id, new { tools = visibleTools });
 
             case "tools/call":
                 return await CallToolAsync(request, token);
@@ -265,10 +269,23 @@ public class McpController(
         if (tool.ValidateArguments(arguments) is { } error)
             return McpResponse.Success(request.Id, McpToolResult.Error(error));
 
+        if (!McpToolPermissions.AllowsTool(token, tool) || !McpToolPermissions.AllowsArguments(token, name, arguments))
+            return McpResponse.Success(request.Id, McpToolResult.Error("当前令牌无权调用此工具或访问目标实例。"));
+
         if (!tokenManager.TryUseTool(token))
             return McpResponse.Fail(request.Id, new McpError { Code = -32000, Message = "MCP tool call limit exceeded or token is no longer active." });
 
-        var output = await aiService.ExecuteToolAsync(name, NormalizeTargetIds(tool, arguments));
+        if (name == "query_operation_status")
+        {
+            var operation = aiService.GetMcpApproval(McpRequest.GetString(arguments, "operation_id") ?? "", token.Id);
+            if (operation == null)
+                return McpResponse.Success(request.Id, McpToolResult.Error("找不到此令牌提交的操作。"));
+            var result = McpToolResult.Success(JsonSerializer.Serialize(operation));
+            result.StructuredContent = operation;
+            return McpResponse.Success(request.Id, result);
+        }
+
+        var output = await aiService.ExecuteMcpToolAsync(name, NormalizeTargetIds(tool, arguments), token.Id);
         return McpResponse.Success(request.Id, output.StartsWith("[ERROR]", StringComparison.Ordinal)
             ? McpToolResult.Error(output)
             : McpToolResult.Success(output));

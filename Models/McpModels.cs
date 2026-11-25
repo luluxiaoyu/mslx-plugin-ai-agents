@@ -213,6 +213,10 @@ public class McpToolResult
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
     public bool IsError { get; set; }
 
+    [JsonPropertyName("structuredContent")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public object? StructuredContent { get; set; }
+
     public static McpToolResult Success(string text) => new()
     {
         Content = new List<McpToolContent> { new() { Type = "text", Text = text } },
@@ -278,6 +282,9 @@ public class McpTokenRecord
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
     public DateTime? ExpiresAt { get; set; }
     public DateTime? LastUsedAt { get; set; }
+    public DateTime? ConnectedAt { get; set; }
+    public bool ReadOnly { get; set; }
+    public int[]? ServerIds { get; set; }
     public bool IsRevoked { get; set; }
     public DateTime? RevokedAt { get; set; }
     internal DateTime ToolCallWindowStartedAt { get; set; }
@@ -296,6 +303,9 @@ public class McpTokenDto
     public DateTime CreatedAt { get; set; }
     public DateTime? ExpiresAt { get; set; }
     public DateTime? LastUsedAt { get; set; }
+    public DateTime? ConnectedAt { get; set; }
+    public bool ReadOnly { get; set; }
+    public int[]? ServerIds { get; set; }
     public bool IsRevoked { get; set; }
     public string Status { get; set; } = "active"; // active, expired, revoked
 }
@@ -308,14 +318,8 @@ public class CreateMcpTokenRequest
     public string Name { get; set; } = string.Empty;
     public int? ExpiresInDays { get; set; }
     public int? ExpireDays { get; set; }
+    public bool ReadOnly { get; set; }
+    public int[]? ServerIds { get; set; }
 
     public int? GetEffectiveDays() => ExpiresInDays ?? ExpireDays;
-}
-
-/// <summary>
-/// 创建 MCP Token 返回结果 (包含一次性明文 Token)
-/// </summary>
-public class McpTokenCreatedDto : McpTokenDto
-{
-    public new string Token { get; set; } = string.Empty;
 }

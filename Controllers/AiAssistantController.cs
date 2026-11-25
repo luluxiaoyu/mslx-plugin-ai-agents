@@ -9,6 +9,7 @@ namespace MSLX.Plugin.AiAgents.Controllers;
 
 [ApiController]
 [Route("api/plugin/mslx-plugin-ai-agents/ai")]
+[Authorize(Roles = "admin")]
 public class AiAssistantController : ControllerBase
 {
     private readonly AiService _aiService;
@@ -46,8 +47,8 @@ public class AiAssistantController : ControllerBase
                 });
             }
 
-            await _aiService.ProcessChatAsync(
-                jsonMessages,
+            await _aiService.RunChatTurnAsync(
+                userId, request.TurnId ?? Guid.NewGuid().ToString("N"), jsonMessages,
                 async (chunkText) =>
                 {
                     await SendSseEventAsync("message", chunkText);
@@ -61,7 +62,7 @@ public class AiAssistantController : ControllerBase
                     });
                     await SendSseEventAsync("tool_executed", toolPayload);
                 },
-                userId
+                HttpContext.RequestAborted
             );
         }
         catch (Exception ex)
@@ -88,37 +89,24 @@ public class AiAssistantController : ControllerBase
         }
     }
 
+    [HttpGet("turns/{id}")]
+    public IActionResult GetTurn(string id) => Ok(_aiService.GetTurnStatus(UserId, id));
+
+    [HttpPost("turns/{id}/stop")]
+    public IActionResult StopTurn(string id) => Ok(new { accepted = _aiService.StopTurn(UserId, id) });
+
+    [HttpGet("operations")]
+    public IActionResult ListOperations() => Ok(_aiService.ListApprovals(UserId));
+
+    private string UserId => User.FindFirst("UserId")?.Value ?? "";
+
     [HttpPost("confirm-tool")]
     [Authorize(Roles = "admin")]
     public async Task<IActionResult> ConfirmTool([FromBody] ConfirmToolRequest request)
     {
-        var userId = User?.FindFirst("UserId")?.Value ?? "";
-        string? toolName = null;
-        object? toolData = null;
-
-        var (success, message, _) = await _aiService.ConfirmPendingToolAsync(
-            request.ConfirmationId,
-            request.Approved,
-            async (name, data) =>
-            {
-                toolName = name;
-                toolData = data;
-                await Task.CompletedTask;
-            },
-            userId);
-
-        return Ok(new ApiResponse<object>
-        {
-            Code = success ? 200 : 400,
-            Message = message,
-            Data = new
-            {
-                success,
-                message,
-                tool = toolName,
-                data = toolData
-            }
-        });
+        var (success, message, data) = await _aiService.ConfirmPendingToolAsync(
+            request.ConfirmationId, request.Approved, UserId);
+        return Ok(new { success, message, data });
     }
 }
 
@@ -131,6 +119,7 @@ public class ConfirmToolRequest
 public class ChatRequest
 {
     public List<ChatMessageDto>? Messages { get; set; }
+    public string? TurnId { get; set; }
 }
 
 public class ChatMessageDto
