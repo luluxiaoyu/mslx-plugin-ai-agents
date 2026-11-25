@@ -25,7 +25,7 @@ public class MSLXPluginEntry : IPlugin
     public string MinSDKVersion => "1.7.9";
     public string Developer => "luluxiaoyu";
     public string AuthorUrl => "https://github.com/luluxiaoyu/mslx-plugin-ai-agents";
-    public string PluginUrl => "https://github.com/luluxiaoyu/mslx-plugin-ai-agents";
+    public string PluginUrl => "https://mslx-plugins.mslmc.net/plugins/mslx-plugin-ai-agents";
     public PluginMultiNodeSupport SupportsMultiNode => PluginMultiNodeSupport.Supported;
 
     public void OnPluginInitialize(IServiceProvider serviceProvider)
