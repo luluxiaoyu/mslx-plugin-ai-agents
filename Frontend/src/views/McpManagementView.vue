@@ -26,7 +26,7 @@ const isLocalEndpoint = computed(() => {
 });
 const clients = [
   { name: '腾讯 WorkBuddy', url: 'https://www.codebuddy.cn/work/' },
-  { name: 'Qoder（千问）', url: 'https://qoder.cn/download' },
+  { name: '千问 Go', url: 'https://www.qianwen.com/chat/workbench' },
   { name: '豆包电脑版', url: 'https://www.doubao.com/download/desktop' },
 ];
 const presetText = '请帮我连上 MSLX。连好后，告诉我有哪些 Minecraft 服务器。先只查看，别改任何设置。';
@@ -390,7 +390,7 @@ onBeforeUnmount(() => window.clearInterval(approvalTimer));
       <ol class="quick-steps">
         <li>
           <h3>打开你常用的 AI 工具</h3>
-          <p>已经装好了就直接打开。还没装，点下面任选一个下载。</p>
+          <p>点击下方链接打开网页或下载客户端。</p>
           <div class="client-links">
             <a
               v-for="client in clients"
@@ -399,7 +399,7 @@ onBeforeUnmount(() => window.clearInterval(approvalTimer));
               :href="client.url"
               target="_blank"
               rel="noopener noreferrer"
-              :aria-label="`在新标签页下载${client.name}`"
+              :aria-label="`在新标签页打开${client.name}`"
             >
               {{ client.name }} <span aria-hidden="true">↗</span>
             </a>
