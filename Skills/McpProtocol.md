@@ -39,6 +39,26 @@
 
 SSE 建立后，首条 `endpoint` 事件提供实际的 POST 地址 `/api/plugin/mslx-plugin-ai-agents/mcp/message?sessionId=…`。客户端向该地址提交 JSON-RPC 消息，POST 返回空的 HTTP 202，结果通过同一 SSE 连接的 `message` 事件送达。会话随连接结束而失效。已有脚本可以继续携带令牌直接向 `/mcp/message` POST 并读取 JSON 响应。
 
+## 文件上传（核心 / 整合包 / 实例文件 / 图片 / 插件 / 证书）
+
+除使用 `stage_upload_file`（支持 `content_text`、`content_base64`、`local_path`）或直接向 `upload_server_file` 等工具传入内容外，大文件可通过 HTTP 上传端点暂存并获取 `uploadId`（即 `fileKey`）：
+
+- **上传文件**：`POST /api/plugin/mslx-plugin-ai-agents/mcp/uploads`
+  - 请求头：`Authorization: Bearer <MCP_TOKEN>`
+  - 支持 `multipart/form-data`（表单字段 `file`，可选 `filename`）或原始二进制请求体（通过 `?filename=...` 或 `X-File-Name` 指定文件名）。
+  - 返回 `{ "uploadId": "...", "fileKey": "...", "fileName": "...", "sizeBytes": 12345, "sha256": "..." }`。
+- **检查整合包内容**：`GET /api/plugin/mslx-plugin-ai-agents/mcp/uploads/{uploadId}/inspect`（或调用 MCP 工具 `inspect_uploaded_archive`），返回是否为 `.mrpack` 及包内候选核心 `.jar` 列表。
+- **删除未使用的暂存文件**：`DELETE /api/plugin/mslx-plugin-ai-agents/mcp/uploads/{uploadId}`。
+- **后续使用方式**：
+  - 创建服务器上传核心/整合包：`create_mc_server(core_file_key=...)` 或 `create_mc_server(package_file_key=..., core_filename=...)`
+  - 替换实例核心：`update_instance_settings(server_id=..., core_file_key=...)`
+  - 上传实例文件 / Mod / 插件 / `server-icon.png`：`upload_server_file(server_id=..., file_name=..., dir_path=..., upload_id=... / content_base64=... / content_text=...)`
+  - 上传面板静态背景图：`upload_panel_image(file_name=..., upload_id=..., apply_to="light"|"dark"|"both"|"none")`
+  - 上传安装本地 MSLX 插件：`upload_mslx_plugin(upload_id=..., overwrite=..., enabled=...)`
+  - 上传面板 SSL 证书与私钥文本：`update_panel_ssl(enable_ssl=true, certificate_text=..., private_key_text=...)`
+
+只读令牌禁止调用任何上传端点与写入工具。
+
 ## 令牌与来源
 
 在 MSLX 的 AI 助手面板创建和吊销 MCP 令牌。令牌过期、吊销或删除后也无法通过既有 SSE 会话继续调用。每个令牌每分钟可执行 60 次工具调用。

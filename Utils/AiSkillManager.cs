@@ -29,7 +29,7 @@ public static class AiSkillManager
     }
 
     private static string ReadSharedSkills() =>
-        string.Join("\n\n", new[] { PublicSummary }.Concat(SharedSkills.Select(Read)).Where(text => text.Length > 0));
+        string.Join("\n\n", SharedSkills.Select(Read).Append(PublicSummary).Where(text => text.Length > 0));
 
     private static string Read(string file)
     {

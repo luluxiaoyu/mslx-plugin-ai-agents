@@ -17,6 +17,7 @@ namespace MSLX.Plugin.AiAgents.Controllers;
 public class McpController(
     AiService aiService,
     McpTokenManager tokenManager,
+    McpUploadService uploadService,
     IConfiguration configuration,
     ILogger<McpController> logger) : ControllerBase
 {
@@ -30,6 +31,129 @@ public class McpController(
     [HttpGet("skill.md")]
     public IActionResult GetSkillMarkdown() =>
         Content(AiSkillManager.GetSkillMarkdown(aiService.GetMcpToolDefinitions()), "text/markdown; charset=utf-8", Encoding.UTF8);
+
+    [HttpPost("uploads")]
+    [DisableRequestSizeLimit]
+    [RequestFormLimits(MultipartBodyLengthLimit = long.MaxValue)]
+    public async Task<IActionResult> UploadFile(CancellationToken cancellationToken)
+    {
+        if (!IsAllowedOrigin())
+            return StatusCode(StatusCodes.Status403Forbidden);
+
+        if (!tokenManager.ValidateToken(GetCredential(allowQueryToken: false), out var token))
+            return UnauthorizedMcp();
+
+        if (token!.ReadOnly)
+            return StatusCode(StatusCodes.Status403Forbidden, new { error = "只读访问令牌不允许上传文件。" });
+
+        if (!tokenManager.MarkUsed(token, toolListRead: false))
+            return UnauthorizedMcp();
+
+        try
+        {
+            string? fileName = Request.Query["filename"].FirstOrDefault()
+                ?? Request.Query["fileName"].FirstOrDefault()
+                ?? (Request.Headers.TryGetValue("X-File-Name", out var headerName)
+                    ? Uri.UnescapeDataString(headerName.ToString())
+                    : null);
+
+            StagedUploadRecord record;
+            if (Request.HasFormContentType)
+            {
+                var form = await Request.ReadFormAsync(cancellationToken);
+                var formFile = form.Files.GetFile("file") ?? form.Files.FirstOrDefault();
+                if (formFile == null || formFile.Length <= 0)
+                    return BadRequest(new { error = "请通过 multipart/form-data 的 file 字段提供非空文件。" });
+
+                fileName ??= form["filename"].FirstOrDefault() ?? form["fileName"].FirstOrDefault() ?? formFile.FileName;
+                await using var stream = formFile.OpenReadStream();
+                record = await uploadService.StageStreamAsync(stream, fileName, $"mcp:{token.Id}", cancellationToken);
+            }
+            else
+            {
+                record = await uploadService.StageStreamAsync(Request.Body, fileName, $"mcp:{token.Id}", cancellationToken);
+            }
+
+            return Ok(new
+            {
+                uploadId = record.UploadId,
+                fileKey = record.UploadId,
+                fileName = record.FileName,
+                sizeBytes = record.SizeBytes,
+                sha256 = record.Sha256,
+                createdAt = record.CreatedAt
+            });
+        }
+        catch (InvalidOperationException ex)
+        {
+            return BadRequest(new { error = ex.Message });
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            return StatusCode(StatusCodes.Status499ClientClosedRequest);
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "MCP HTTP 文件上传失败");
+            return StatusCode(StatusCodes.Status500InternalServerError, new { error = "文件上传失败。" });
+        }
+    }
+
+    [HttpGet("uploads/{uploadId}/inspect")]
+    public IActionResult InspectUploadedArchive(string uploadId)
+    {
+        if (!IsAllowedOrigin())
+            return StatusCode(StatusCodes.Status403Forbidden);
+
+        if (!tokenManager.ValidateToken(GetCredential(allowQueryToken: false), out var token))
+            return UnauthorizedMcp();
+
+        if (!McpUploadService.IsValidUploadId(uploadId))
+            return BadRequest(new { error = "uploadId 格式无效，应为 32 位十六进制字符。" });
+
+        if (!uploadService.IsOwned(uploadId, $"mcp:{token!.Id}"))
+            return StatusCode(StatusCodes.Status403Forbidden, new { error = "上传会话不存在、已过期或无权访问。" });
+
+        var filePath = McpUploadService.GetStagedFilePath(uploadId);
+        if (!System.IO.File.Exists(filePath))
+            return NotFound(new { error = "未找到已上传的临时文件。" });
+
+        try
+        {
+            var result = uploadService.InspectArchive(filePath);
+            return Ok(result);
+        }
+        catch (InvalidDataException)
+        {
+            return BadRequest(new { error = "无法解析压缩包，请确认上传的是有效的 .zip 或 .mrpack 文件。" });
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "检查已上传压缩包失败: {UploadId}", uploadId);
+            return BadRequest(new { error = $"解析压缩包失败: {ex.Message}" });
+        }
+    }
+
+    [HttpDelete("uploads/{uploadId}")]
+    public IActionResult DeleteUploadedFile(string uploadId)
+    {
+        if (!IsAllowedOrigin())
+            return StatusCode(StatusCodes.Status403Forbidden);
+
+        if (!tokenManager.ValidateToken(GetCredential(allowQueryToken: false), out var token))
+            return UnauthorizedMcp();
+
+        if (token!.ReadOnly)
+            return StatusCode(StatusCodes.Status403Forbidden, new { error = "只读访问令牌不允许删除上传文件。" });
+
+        if (!McpUploadService.IsValidUploadId(uploadId))
+            return BadRequest(new { error = "uploadId 格式无效。" });
+
+        if (!uploadService.DeleteStagedUpload(uploadId, $"mcp:{token.Id}"))
+            return NotFound(new { error = "上传文件不存在或无权删除。" });
+
+        return Ok(new { deleted = true, uploadId });
+    }
 
     [HttpGet("sse")]
     public async Task GetSse(CancellationToken cancellationToken)

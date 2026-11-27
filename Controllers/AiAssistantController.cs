@@ -62,7 +62,15 @@ public class AiAssistantController : ControllerBase
                     });
                     await SendSseEventAsync("tool_executed", toolPayload);
                 },
-                HttpContext.RequestAborted
+                HttpContext.RequestAborted,
+                async (contextStatus) =>
+                {
+                    var payload = System.Text.Json.JsonSerializer.Serialize(contextStatus, new System.Text.Json.JsonSerializerOptions
+                    {
+                        PropertyNamingPolicy = System.Text.Json.JsonNamingPolicy.CamelCase
+                    });
+                    await SendSseEventAsync("context_status", payload);
+                }
             );
         }
         catch (Exception ex)

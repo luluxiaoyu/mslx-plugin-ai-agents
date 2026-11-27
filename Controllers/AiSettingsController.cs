@@ -1,7 +1,9 @@
+using System.ComponentModel.DataAnnotations;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using MSLX.Plugin.AiAgents.Models;
 using MSLX.Plugin.AiAgents.Services;
+using MSLX.Plugin.AiAgents.Utils;
 using MSLX.SDK;
 using MSLX.SDK.Interfaces;
 using MSLX.SDK.Models;
@@ -16,10 +18,12 @@ public class AiSettingsController : ControllerBase
         MSLX.SDK.MSLX.Config.GetPluginConfig("mslx-plugin-ai-agents");
 
     private readonly McpTokenManager _tokenManager;
+    private readonly AiService _aiService;
 
-    public AiSettingsController(McpTokenManager tokenManager)
+    public AiSettingsController(McpTokenManager tokenManager, AiService aiService)
     {
         _tokenManager = tokenManager;
+        _aiService = aiService;
     }
 
     [HttpGet]
@@ -27,6 +31,7 @@ public class AiSettingsController : ControllerBase
     public IActionResult GetAiSettings()
     {
         var config = Config.ReadConfig();
+        var (contextTokens, contextLabel) = ModelContextLengthHelper.Resolve((string?)config["aiContextLength"]);
         return Ok(new ApiResponse<object>
         {
             Code = 200,
@@ -36,7 +41,10 @@ public class AiSettingsController : ControllerBase
                 AiEnabled = !string.IsNullOrWhiteSpace((string?)config["aiApiKey"]),
                 AiApiKey = (string?)(config["aiApiKey"]) ?? "",
                 AiBaseUrl = (string?)(config["aiBaseUrl"]) ?? "https://api.deepseek.com/v1",
-                AiModelName = (string?)(config["aiModelName"]) ?? "deepseek-chat"
+                AiModelName = (string?)(config["aiModelName"]) ?? "deepseek-chat",
+                AiContextLength = contextLabel,
+                AiContextTokens = contextTokens,
+                BasePromptTokens = _aiService.GetBaseContextTokens()
             }
         });
     }
@@ -45,15 +53,24 @@ public class AiSettingsController : ControllerBase
     [Authorize(Roles = "admin")]
     public IActionResult UpdateAiSettings([FromBody] AiSettingsRequest request)
     {
+        ModelContextLengthHelper.TryParse(request.AiContextLength, out var contextTokens, out var normalizedContextLength, out _);
+
         Config.WriteConfigKey("aiEnabled", !string.IsNullOrWhiteSpace(request.AiApiKey));
         Config.WriteConfigKey("aiApiKey", request.AiApiKey ?? "");
         Config.WriteConfigKey("aiBaseUrl", request.AiBaseUrl ?? "https://api.deepseek.com/v1");
         Config.WriteConfigKey("aiModelName", request.AiModelName ?? "deepseek-chat");
+        Config.WriteConfigKey("aiContextLength", normalizedContextLength);
 
         return Ok(new ApiResponse<object>
         {
             Code = 200,
-            Message = "AI 配置更新成功"
+            Message = "AI 配置更新成功",
+            Data = new
+            {
+                AiContextLength = normalizedContextLength,
+                AiContextTokens = contextTokens,
+                BasePromptTokens = _aiService.GetBaseContextTokens()
+            }
         });
     }
 
@@ -215,4 +232,8 @@ public class AiSettingsRequest
     public string? AiApiKey { get; set; }
     public string? AiBaseUrl { get; set; }
     public string? AiModelName { get; set; }
+
+    [Required(AllowEmptyStrings = false, ErrorMessage = "模型上下文长度不能为空，支持如 128k、256k、1M。")]
+    [ModelContextLength]
+    public string AiContextLength { get; set; } = ModelContextLengthHelper.DefaultContextLengthText;
 }

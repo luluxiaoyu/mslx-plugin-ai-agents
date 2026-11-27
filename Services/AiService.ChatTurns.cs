@@ -54,7 +54,8 @@ public partial class AiService
     }
 
     public async Task RunChatTurnAsync(string userId, string turnId, JsonArray messages, Func<string, Task> onChunk,
-        Func<string, object, Task> onTool, CancellationToken connectionAborted)
+        Func<string, object, Task> onTool, CancellationToken connectionAborted,
+        Func<AiContextStatus, Task>? onContextStatus = null)
     {
         if (string.IsNullOrWhiteSpace(userId) || !Guid.TryParseExact(turnId, "N", out _))
             throw new ArgumentException("请求编号无效。");
@@ -84,7 +85,7 @@ public partial class AiService
                     else if (turn.Tools.Count > 0) turn.Tools[^1] = new TurnTool(name, state, taskId, operationId);
                     PluginData.WriteJson(TurnPath, _turns);
                 }
-            });
+            }, onContextStatus);
             status = "succeeded";
         }
         catch (OperationCanceledException) when (source.IsCancellationRequested) { status = "cancelled"; }

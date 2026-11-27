@@ -37,7 +37,11 @@ public class AiChatHub : Hub
                 {
                     await Clients.Caller.SendAsync("ToolExecuted", toolName, toolData, turnId);
                 },
-                Context.ConnectionAborted
+                Context.ConnectionAborted,
+                async (contextStatus) =>
+                {
+                    await Clients.Caller.SendAsync("ContextStatus", contextStatus, turnId);
+                }
             );
 
             await Clients.Caller.SendAsync("ChatComplete");

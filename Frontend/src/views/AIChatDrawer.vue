@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, watch, onMounted, onBeforeUnmount } from 'vue';
+import { ref, computed, watch, onMounted, onBeforeUnmount } from 'vue';
 import { useRoute } from 'vue-router';
 import { MessagePlugin, Loading as TLoading } from 'tdesign-vue-next';
 import { Chat as TChat, ChatItem as TChatItem, ChatSender as TChatSender } from '@tdesign-vue-next/chat';
@@ -20,7 +20,7 @@ import {
 } from 'tdesign-icons-vue-next';
 import ModeSelectView from './ModeSelectView.vue';
 import McpManagementView from './McpManagementView.vue';
-import { useAiApi, statusLabels, type ChatMessage, type ChatTurnStatus } from '../api/aiApi';
+import { useAiApi, statusLabels, type AiContextStatus, type ChatMessage, type ChatTurnStatus } from '../api/aiApi';
 
 const { sendAiChatStream, abortAiChatStream, confirmAiToolAction, getAiSettings,
   updateAiSettings, testModel, getTurnStatus, historyKey } = useAiApi();
@@ -88,14 +88,18 @@ const handleSwitchToModeSelect = () => {
   localStorage.removeItem('mslx_ai_selected_mode');
 };
 
-// ================= API Key 模型设置弹窗 =================
+// ================= API Key 模型设置弹窗 & 上下文状态 =================
 const settingsModalVisible = ref(false);
 const settingsLoading = ref(false);
 const testingModel = ref(false);
 const handleTestModel = async () => {
   testingModel.value = true;
   try {
-    const { message } = await testModel({ ...aiSettingsForm.value, aiEnabled: true });
+    const { message } = await testModel({
+      ...aiSettingsForm.value,
+      aiContextLength: aiSettingsForm.value.aiContextLength.trim(),
+      aiEnabled: true,
+    });
     MessagePlugin.success(message);
   } catch (error) {
     MessagePlugin.error(error instanceof Error ? error.message : '模型连接失败。');
@@ -109,7 +113,35 @@ const aiSettingsForm = ref({
   aiApiKey: '',
   aiBaseUrl: 'https://api.deepseek.com/v1',
   aiModelName: 'deepseek-chat',
+  aiContextLength: '256k',
 });
+
+const contextConfig = ref({
+  maxLabel: '256k',
+  maxTokens: 256 * 1024,
+  basePromptTokens: 15000,
+});
+
+const applyContextSettingsMeta = (res?: { aiContextLength?: string; aiContextTokens?: number; basePromptTokens?: number }) => {
+  if (!res) return;
+  contextConfig.value = {
+    maxLabel: res.aiContextLength || contextConfig.value.maxLabel || '256k',
+    maxTokens: res.aiContextTokens && res.aiContextTokens > 0 ? res.aiContextTokens : contextConfig.value.maxTokens,
+    basePromptTokens: res.basePromptTokens && res.basePromptTokens > 0 ? res.basePromptTokens : contextConfig.value.basePromptTokens,
+  };
+};
+
+let contextSettingsLoaded = false;
+const loadContextSettings = async (force = false) => {
+  if (contextSettingsLoaded && !force) return;
+  try {
+    const res = await getAiSettings();
+    applyContextSettingsMeta(res);
+    contextSettingsLoaded = true;
+  } catch {
+    // 未配置或非管理员时保持默认 256k
+  }
+};
 
 const openSettingsModal = async () => {
   settingsModalVisible.value = true;
@@ -121,7 +153,10 @@ const openSettingsModal = async () => {
         aiApiKey: res.aiApiKey || '',
         aiBaseUrl: res.aiBaseUrl || 'https://api.deepseek.com/v1',
         aiModelName: res.aiModelName || 'deepseek-chat',
+        aiContextLength: res.aiContextLength || '256k',
       };
+      applyContextSettingsMeta(res);
+      contextSettingsLoaded = true;
     }
   } catch (e: any) {
     console.warn('加载设置失败:', e);
@@ -137,12 +172,18 @@ const handleSaveAiSettings = async () => {
   }
   settingsSubmitting.value = true;
   try {
-    await updateAiSettings({
+    const saved: any = await updateAiSettings({
       aiEnabled: true,
       aiApiKey: aiSettingsForm.value.aiApiKey.trim(),
       aiBaseUrl: aiSettingsForm.value.aiBaseUrl.trim() || 'https://api.deepseek.com/v1',
       aiModelName: aiSettingsForm.value.aiModelName.trim() || 'deepseek-chat',
+      aiContextLength: aiSettingsForm.value.aiContextLength.trim(),
     });
+    applyContextSettingsMeta(saved);
+    if (saved?.aiContextLength) {
+      aiSettingsForm.value.aiContextLength = saved.aiContextLength;
+    }
+    contextSettingsLoaded = true;
     MessagePlugin.success('AI 助手模型配置保存成功');
     settingsModalVisible.value = false;
   } catch (e: any) {
@@ -276,12 +317,148 @@ const loadHistory = (): DisplayMessage[] => {
   return [defaultWelcomeMessage];
 };
 
+interface ContextArchive {
+  summary: string;
+  upToMessageId: string;
+  beforeTokens?: number;
+  afterTokens?: number;
+}
+
+const archiveStorageKey = historyKey ? `${historyKey}:context_archive` : undefined;
+
+const loadContextArchive = (): ContextArchive | null => {
+  try {
+    const raw = archiveStorageKey ? localStorage.getItem(archiveStorageKey) : null;
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed.summary === 'string' && typeof parsed.upToMessageId === 'string') {
+      return parsed;
+    }
+  } catch {
+    // ignore invalid cache
+  }
+  return null;
+};
+
 const chatList = ref<DisplayMessage[]>(loadHistory());
+const contextArchive = ref<ContextArchive | null>(loadContextArchive());
+const lastBackendContext = ref<AiContextStatus | null>(null);
 const inputText = ref('');
 const loading = ref(false);
 const suggestedReplies = ref<string[]>([]);
 const confirmingToolId = ref<string | null>(null);
 const activeStreamingId = ref<string | null>(null);
+
+const estimateTextTokens = (text?: string): number => {
+  if (!text) return 0;
+  let ascii = 0;
+  let cjk = 0;
+  let other = 0;
+  for (let i = 0; i < text.length; i++) {
+    const code = text.charCodeAt(i);
+    if (code < 0x80) {
+      ascii++;
+    } else if (
+      (code >= 0x4e00 && code <= 0x9fff) ||
+      (code >= 0x3400 && code <= 0x4dbf) ||
+      (code >= 0x3000 && code <= 0x303f) ||
+      (code >= 0xff00 && code <= 0xffef)
+    ) {
+      cjk++;
+    } else {
+      other++;
+    }
+  }
+  return Math.ceil(cjk * 1.35 + other * 1.5 + ascii * 0.28);
+};
+
+const formatTokenCount = (tokens?: number | null): string => {
+  if (tokens == null || !Number.isFinite(tokens) || tokens < 0) return '0';
+  if (tokens < 1024) return String(Math.round(tokens));
+  if (tokens < 1024 * 1024) return `${Number((tokens / 1024).toFixed(1))}k`;
+  return `${Number((tokens / (1024 * 1024)).toFixed(2))}m`;
+};
+
+const getActiveMessagesForContext = (source: DisplayMessage[]) => {
+  const archive = contextArchive.value;
+  if (!archive) return { archive: null as ContextArchive | null, messages: source };
+  const idx = source.findIndex((m) => m.id === archive.upToMessageId);
+  if (idx < 0) return { archive: null as ContextArchive | null, messages: source };
+  return { archive, messages: source.slice(idx + 1) };
+};
+
+const contextDisplay = computed(() => {
+  const maxTokens = contextConfig.value.maxTokens || 256 * 1024;
+  const maxLabel = contextConfig.value.maxLabel || '256k';
+  const backend = lastBackendContext.value;
+
+  let usedTokens = 0;
+  let isEstimated = true;
+
+  if (backend && backend.maxTokens === maxTokens) {
+    usedTokens = backend.usedTokens;
+    isEstimated = backend.isEstimated;
+  } else {
+    const { archive, messages } = getActiveMessagesForContext(
+      chatList.value.filter((m) => !(m.role === 'assistant' && m.content === '正在思考与处理...'))
+    );
+    let total = contextConfig.value.basePromptTokens;
+    if (archive?.summary) {
+      total += 4 + estimateTextTokens(`【历史对话上下文已自动压缩摘要】\n${archive.summary}`);
+    }
+    for (const m of messages) {
+      total += 4 + estimateTextTokens(m.content);
+    }
+    usedTokens = total;
+    isEstimated = true;
+  }
+
+  const percent = maxTokens > 0 ? Math.min(100, Number(((usedTokens * 100) / maxTokens).toFixed(1))) : 0;
+  const thresholdTokens = Math.max(1, Math.floor(maxTokens * 0.8));
+  const themeClass = percent >= 80 ? 'is-danger' : percent >= 60 ? 'is-warning' : 'is-normal';
+  const compressed = Boolean(contextArchive.value || backend?.compressed);
+
+  const lines = [
+    `当前占用：${usedTokens.toLocaleString()} tokens（${isEstimated ? '估算' : '模型返回'}）`,
+    `上下文上限：${maxLabel}（${maxTokens.toLocaleString()} tokens）`,
+    `自动压缩阈值：80%（${thresholdTokens.toLocaleString()} tokens）`,
+  ];
+  if (contextArchive.value) {
+    const compDetail =
+      contextArchive.value.beforeTokens && contextArchive.value.afterTokens
+        ? `（${formatTokenCount(contextArchive.value.beforeTokens)} → ${formatTokenCount(contextArchive.value.afterTokens)}）`
+        : '';
+    lines.push(`已启用自动上下文压缩${compDetail}`);
+  }
+
+  return {
+    usedTokens,
+    usedLabel: formatTokenCount(usedTokens),
+    maxTokens,
+    maxLabel,
+    percent,
+    themeClass,
+    compressed,
+    tooltip: lines.join('\n'),
+  };
+});
+
+watch(
+  contextArchive,
+  (val) => {
+    try {
+      if (!archiveStorageKey) return;
+      if (val) {
+        localStorage.setItem(archiveStorageKey, JSON.stringify(val));
+      } else {
+        localStorage.removeItem(archiveStorageKey);
+      }
+    } catch {
+      // ignore storage errors
+    }
+  },
+  { deep: true }
+);
 
 watch(
   chatList,
@@ -307,8 +484,11 @@ const handleClearHistory = () => {
     handleAbort();
   }
   chatList.value = [{ ...defaultWelcomeMessage, id: `welcome_${Date.now()}` }];
+  contextArchive.value = null;
+  lastBackendContext.value = null;
   suggestedReplies.value = [];
   if (historyKey) localStorage.removeItem(historyKey);
+  if (archiveStorageKey) localStorage.removeItem(archiveStorageKey);
   MessagePlugin.success('AI 对话历史已成功清空');
 };
 
@@ -372,6 +552,12 @@ const toolFriendlyNames: Record<string, string> = {
   query_python_environments: '探测 Python 及 MCDR 环境',
   extract_archive: '解压服务器压缩包',
   compress_files: '压缩服务器文件',
+  stage_upload_file: '暂存上传文件',
+  inspect_uploaded_archive: '解析已上传压缩包',
+  upload_server_file: '上传文件到服务器目录',
+  upload_panel_image: '上传面板静态图片',
+  upload_mslx_plugin: '上传并安装 MSLX 插件',
+  update_panel_ssl: '配置面板 SSL 证书',
 };
 
 const getToolFriendlyName = (toolName?: string): string => {
@@ -508,6 +694,10 @@ const handleReplayMessage = (msg: DisplayMessage) => {
     return;
   }
   chatList.value = chatList.value.slice(0, idx);
+  if (contextArchive.value && !chatList.value.some((m) => m.id === contextArchive.value!.upToMessageId)) {
+    contextArchive.value = null;
+  }
+  lastBackendContext.value = null;
   inputText.value = prevUser.content;
   handleSend();
 };
@@ -540,6 +730,8 @@ const handleSend = async (value?: string) => {
   activeStreamingId.value = botMsgId;
 
   const activeServerId = getCurrentServerId();
+  const chatHistoryBeforeBot = chatList.value.filter((m) => m.id !== botMsgId);
+  const { archive, messages: unarchivedMessages } = getActiveMessagesForContext(chatHistoryBeforeBot);
 
   const apiMessages: ChatMessage[] = [
     ...(activeServerId
@@ -550,12 +742,18 @@ const handleSend = async (value?: string) => {
           },
         ]
       : []),
-    ...chatList.value
-      .filter((m) => m.id !== botMsgId)
-      .map((m) => ({
-        role: m.role,
-        content: m.content,
-      })),
+    ...(archive?.summary
+      ? [
+          {
+            role: 'system' as const,
+            content: `【历史对话上下文已自动压缩摘要】\n${archive.summary}`,
+          },
+        ]
+      : []),
+    ...unarchivedMessages.map((m) => ({
+      role: m.role,
+      content: m.content,
+    })),
   ];
 
   let isFirstChunk = true;
@@ -619,12 +817,49 @@ const handleSend = async (value?: string) => {
     (status) => {
       const target = chatList.value.find((m) => m.id === botMsgId);
       if (target) target.turnStatus = status;
+    },
+    (contextStatus) => {
+      lastBackendContext.value = contextStatus;
+      applyContextSettingsMeta({
+        aiContextLength: contextStatus.maxLabel,
+        aiContextTokens: contextStatus.maxTokens,
+      });
+      if (contextStatus.compressed) {
+        if (contextStatus.summary && contextStatus.archivedSourceCount > 0 && unarchivedMessages.length > 0) {
+          const archivedIdx = Math.min(contextStatus.archivedSourceCount, unarchivedMessages.length) - 1;
+          const archivedMsg = unarchivedMessages[archivedIdx];
+          if (archivedMsg) {
+            contextArchive.value = {
+              summary: contextStatus.summary,
+              upToMessageId: archivedMsg.id,
+              beforeTokens: contextStatus.compressedBeforeTokens ?? undefined,
+              afterTokens: contextStatus.compressedAfterTokens ?? undefined,
+            };
+          }
+        }
+        const beforeLabel = formatTokenCount(contextStatus.compressedBeforeTokens);
+        const afterLabel = formatTokenCount(contextStatus.compressedAfterTokens);
+        MessagePlugin.info(`上下文接近上限，已自动压缩（${beforeLabel} → ${afterLabel}）`);
+      }
     }
   );
 };
 
+watch(
+  [() => props.visible, selectedMode],
+  ([isVisible, mode]) => {
+    if (isVisible && mode === 'apikey') {
+      void loadContextSettings();
+    }
+  },
+  { immediate: true }
+);
+
 onMounted(() => {
   updateTheme();
+  if (selectedMode.value === 'apikey') {
+    void loadContextSettings();
+  }
   themeObserver = new MutationObserver(() => {
     updateTheme();
   });
@@ -693,9 +928,6 @@ onBeforeUnmount(() => {
                 <template #icon><desktop-icon class="mode-icon" aria-hidden="true" /></template>
               </t-button>
             </t-tooltip>
-            <t-button v-if="selectedMode === 'mcp'" variant="text" shape="square" size="small" class="close-btn" aria-label="关闭 AI 助手" @click="handleClose">
-              <template #icon><close-icon aria-hidden="true" /></template>
-            </t-button>
           </div>
         </div>
       </template>
@@ -835,6 +1067,22 @@ onBeforeUnmount(() => {
         </div>
 
         <div class="chat-input-area">
+          <div class="context-status-bar">
+            <t-tooltip :content="contextDisplay.tooltip" placement="top-left">
+              <div class="context-status-left" :class="contextDisplay.themeClass">
+                <span class="context-progress-track">
+                  <span class="context-progress-fill" :style="{ width: `${contextDisplay.percent}%` }" />
+                </span>
+                <span class="context-status-text">
+                  上下文 {{ contextDisplay.usedLabel }} / {{ contextDisplay.maxLabel }} ({{ contextDisplay.percent }}%)
+                </span>
+                <span v-if="contextDisplay.compressed" class="context-compressed-badge">已压缩</span>
+              </div>
+            </t-tooltip>
+            <button type="button" class="context-limit-btn" @click="openSettingsModal">
+              上限 {{ contextDisplay.maxLabel }}
+            </button>
+          </div>
           <t-chat-sender
             v-model="inputText"
             :loading="loading"
@@ -1035,6 +1283,22 @@ onBeforeUnmount(() => {
             </div>
 
             <div class="chat-input-area">
+              <div class="context-status-bar">
+                <t-tooltip :content="contextDisplay.tooltip" placement="top-left">
+                  <div class="context-status-left" :class="contextDisplay.themeClass">
+                    <span class="context-progress-track">
+                      <span class="context-progress-fill" :style="{ width: `${contextDisplay.percent}%` }" />
+                    </span>
+                    <span class="context-status-text">
+                      上下文 {{ contextDisplay.usedLabel }} / {{ contextDisplay.maxLabel }} ({{ contextDisplay.percent }}%)
+                    </span>
+                    <span v-if="contextDisplay.compressed" class="context-compressed-badge">已压缩</span>
+                  </div>
+                </t-tooltip>
+                <button type="button" class="context-limit-btn" @click="openSettingsModal">
+                  上限 {{ contextDisplay.maxLabel }}
+                </button>
+              </div>
               <t-chat-sender
                 v-model="inputText"
                 :loading="loading"
@@ -1081,6 +1345,16 @@ onBeforeUnmount(() => {
           <t-input
             v-model="aiSettingsForm.aiModelName"
             placeholder="默认 deepseek-chat"
+          />
+        </t-form-item>
+
+        <t-form-item
+          label="上下文长度"
+          help="支持大小写 k/m 单位（如 128k、256K、1M）或数字，默认 256k；接近上限时将自动压缩上下文"
+        >
+          <t-input
+            v-model="aiSettingsForm.aiContextLength"
+            placeholder="默认 256k（如 128k、256k、1M）"
           />
         </t-form-item>
         <t-button variant="outline" :loading="testingModel" :disabled="settingsSubmitting" @click="handleTestModel">测试模型连接</t-button>
@@ -1212,10 +1486,6 @@ onBeforeUnmount(() => {
 
 .mcp-window-header .drawer-title {
   font-weight: 600;
-}
-
-.drawer-header-row.mcp-window-header {
-  padding-right: 0;
 }
 
 .mcp-window-header .header-actions {
@@ -1796,5 +2066,92 @@ onBeforeUnmount(() => {
 .mslx-chat-component :deep(.clear-btn-text),
 .mslx-chat-component :deep(.t-chat__list .t-divider) {
   display: none !important;
+}
+
+.context-status-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 8px;
+  padding: 0 2px;
+  font-size: 11px;
+  line-height: 1.2;
+  color: var(--td-text-color-secondary);
+}
+
+.context-status-left {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  cursor: default;
+}
+
+.context-progress-track {
+  width: 44px;
+  height: 4px;
+  border-radius: 999px;
+  background-color: var(--td-bg-color-component, rgba(128, 128, 128, 0.2));
+  overflow: hidden;
+  flex-shrink: 0;
+}
+
+.context-progress-fill {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+  background-color: var(--td-brand-color);
+  transition: width 0.25s ease, background-color 0.25s ease;
+}
+
+.context-status-left.is-warning .context-progress-fill {
+  background-color: var(--td-warning-color);
+}
+
+.context-status-left.is-warning .context-status-text {
+  color: var(--td-warning-color);
+}
+
+.context-status-left.is-danger .context-progress-fill {
+  background-color: var(--td-error-color);
+}
+
+.context-status-left.is-danger .context-status-text {
+  color: var(--td-error-color);
+  font-weight: 500;
+}
+
+.context-status-text {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.context-compressed-badge {
+  flex-shrink: 0;
+  padding: 1px 6px;
+  border-radius: 999px;
+  font-size: 10px;
+  background-color: var(--td-brand-color-light);
+  color: var(--td-brand-color);
+}
+
+.context-limit-btn {
+  flex-shrink: 0;
+  padding: 2px 6px;
+  border: 1px solid var(--td-component-border);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--td-text-color-secondary);
+  font-size: 11px;
+  line-height: 1.2;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.context-limit-btn:hover {
+  border-color: var(--td-brand-color);
+  color: var(--td-brand-color);
 }
 </style>

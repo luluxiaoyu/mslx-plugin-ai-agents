@@ -5,6 +5,23 @@ export interface AiSettingsModel {
   aiApiKey: string;
   aiBaseUrl: string;
   aiModelName: string;
+  aiContextLength?: string;
+  aiContextTokens?: number;
+  basePromptTokens?: number;
+}
+
+export interface AiContextStatus {
+  usedTokens: number;
+  maxTokens: number;
+  maxLabel: string;
+  usagePercent: number;
+  isEstimated: boolean;
+  compressed: boolean;
+  compressedBeforeTokens?: number | null;
+  compressedAfterTokens?: number | null;
+  summary?: string | null;
+  archivedSourceCount: number;
+  compressionThresholdTokens: number;
 }
 
 export interface McpTokenModel {
@@ -117,6 +134,7 @@ export function useAiApi() {
     onError: (error: string) => void,
     onDone: () => void,
     onStatus: (status: ChatTurnStatus) => void,
+    onContextStatus?: (status: AiContextStatus) => void,
   ) {
     const controller = new AbortController();
     active = { id, controller };
@@ -130,6 +148,9 @@ export function useAiApi() {
     const errorHandler = (error: string, turnId: string) => {
       if (turnId === id && !controller.signal.aborted) onError(error);
     };
+    const contextHandler = (contextStatus: AiContextStatus, turnId: string) => {
+      if (turnId === id && !controller.signal.aborted) onContextStatus?.(contextStatus);
+    };
     try {
       try { hub = await getConnection(); } catch { /* HTTP uses the same node context. */ }
       if (controller.signal.aborted) return;
@@ -141,6 +162,7 @@ export function useAiApi() {
       hub.on('ChatChunk', chunkHandler);
       hub.on('ToolExecuted', toolHandler);
       hub.on('ChatError', errorHandler);
+      hub.on('ContextStatus', contextHandler);
       await hub.invoke('StartChatTurn', id, messages);
     } catch {
       if (!controller.signal.aborted) {
@@ -153,6 +175,7 @@ export function useAiApi() {
         hub.off('ChatChunk', chunkHandler);
         hub.off('ToolExecuted', toolHandler);
         hub.off('ChatError', errorHandler);
+        hub.off('ContextStatus', contextHandler);
       }
       if (active?.id === id) active = undefined;
       onDone();
@@ -185,6 +208,10 @@ export function useAiApi() {
             if (type === 'tool_executed') {
               const result = JSON.parse(data);
               onTool(result.tool, result.data);
+            }
+            if (type === 'context_status') {
+              const result: AiContextStatus = JSON.parse(data);
+              onContextStatus?.(result);
             }
           }
         }
