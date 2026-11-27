@@ -21,6 +21,12 @@ const handleSelect = (mode: 'mcp' | 'apikey') => {
         </h2>
         <p class="text-xs text-[var(--td-text-color-secondary)] mt-2 mb-0 leading-relaxed max-w-md mx-auto">
           MSLX 提供了两种不同的 AI 接入与交互方案。请根据您的需求选择，后续可随时在界面中切换。
+          <a
+            href="https://mslx.mslmc.cn/docs/server/ai/"
+            target="_blank"
+            rel="noopener noreferrer"
+            class="text-[var(--td-brand-color)] hover:underline ml-1"
+          >查看使用指南 ↗</a>
         </p>
       </div>
 

@@ -17,6 +17,7 @@ import {
   MoveIcon,
   SettingIcon,
   SwapIcon,
+  BrowseIcon,
 } from 'tdesign-icons-vue-next';
 import ModeSelectView from './ModeSelectView.vue';
 import McpManagementView from './McpManagementView.vue';
@@ -913,6 +914,17 @@ onBeforeUnmount(() => {
             </template>
           </div>
           <div class="header-actions">
+            <t-tooltip content="使用指南">
+              <a
+                class="guide-header-link"
+                href="https://mslx.mslmc.cn/docs/server/ai/"
+                target="_blank"
+                rel="noopener noreferrer"
+              >
+                <browse-icon size="14px" aria-hidden="true" />
+                <span>使用指南</span>
+              </a>
+            </t-tooltip>
             <t-tooltip v-if="selectedMode" content="切换工作模式">
               <t-button variant="text" size="small" class="mode-switch-btn" @click="handleSwitchToModeSelect">
                 <template #icon><swap-icon /></template>
@@ -1128,6 +1140,17 @@ onBeforeUnmount(() => {
             </template>
           </div>
           <div class="header-actions">
+            <t-tooltip content="使用指南">
+              <a
+                class="guide-header-link"
+                href="https://mslx.mslmc.cn/docs/server/ai/"
+                target="_blank"
+                rel="noopener noreferrer"
+              >
+                <browse-icon size="14px" aria-hidden="true" />
+                <span>使用指南</span>
+              </a>
+            </t-tooltip>
             <t-tooltip v-if="selectedMode" content="切换工作模式">
               <t-button variant="text" size="small" class="mode-switch-btn" @click="handleSwitchToModeSelect">
                 <template #icon><swap-icon /></template>
@@ -1383,6 +1406,23 @@ onBeforeUnmount(() => {
 .mode-switch-btn {
   color: var(--td-text-color-primary) !important;
   font-size: 12px !important;
+}
+
+.guide-header-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: var(--td-radius-small);
+  color: var(--td-brand-color);
+  font-size: 12px;
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.guide-header-link:hover {
+  background: var(--td-bg-color-container-hover);
+  text-decoration: underline;
 }
 
 .settings-btn {

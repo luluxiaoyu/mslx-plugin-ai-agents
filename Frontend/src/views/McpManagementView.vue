@@ -464,6 +464,16 @@ onBeforeUnmount(() => window.clearInterval(approvalTimer));
     <section class="mcp-section" aria-labelledby="mcp-quick-heading">
       <div class="section-header">
         <div><h2 id="mcp-quick-heading">让 AI 帮你查看服务器</h2><p>当前节点 · {{ endpoints.nodeName }}</p></div>
+        <a
+          class="guide-link"
+          href="https://mslx.mslmc.cn/docs/server/ai/"
+          target="_blank"
+          rel="noopener noreferrer"
+          aria-label="在新标签页打开使用指南"
+        >
+          <BrowseIcon aria-hidden="true" />
+          使用指南
+        </a>
       </div>
       <ol class="quick-steps">
         <li>
