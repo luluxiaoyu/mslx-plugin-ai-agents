@@ -20,7 +20,7 @@ public class MSLXPluginEntry : IPlugin
     public string Id => "mslx-plugin-ai-agents";
     public string Name => "AI 助手";
     public string Description => "支持在线对话 & MCP 服务的 AI 助手插件，可让AI助手帮您操作 MSLX。";
-    public string Version => "1.1.0";
+    public string Version => "1.2.0";
     public string Icon => "f06867909c1984881489196158935cf0_3785578587551796133.png";
     public string MinSDKVersion => "1.7.9";
     public string Developer => "luluxiaoyu";
