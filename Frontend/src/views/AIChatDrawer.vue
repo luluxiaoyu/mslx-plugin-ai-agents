@@ -564,6 +564,9 @@ const toolFriendlyNames: Record<string, string> = {
   update_panel_ssl: '配置面板 SSL 证书',
   request_terminal_permission: '申请实例终端权限',
   run_server_terminal: '在实例目录执行终端命令',
+  list_background_tasks: '查询后台任务列表',
+  query_background_task: '查询单个后台任务进度',
+  cancel_background_task: '取消后台任务',
 };
 
 const getToolFriendlyName = (toolName?: string): string => {
@@ -588,7 +591,8 @@ const syncHostStores = (toolName?: string) => {
       'compress_files',
       'extract_archive',
       'update_instance_settings',
-      'update_server_config'
+      'update_server_config',
+      'cancel_background_task'
     ];
 
     const isTaskTool = !toolName || taskRelatedTools.includes(toolName);

@@ -1061,6 +1061,7 @@ public partial class AiService
         RegisterResourcesTools(tools);
         RegisterUploadTools(tools);
         RegisterTerminalTools(tools);
+        RegisterBackgroundTaskTools(tools);
 
         return tools;
     }
@@ -2518,6 +2519,8 @@ public partial class AiService
                     if (uploadRes != null) return uploadRes;
                     var terminalRes = await HandleTerminalToolAsync(name, args, onToolExecuted, assumeConfirmed, userId);
                     if (terminalRes != null) return terminalRes;
+                    var bgTaskRes = await HandleBackgroundTaskToolAsync(name, args, onToolExecuted, userId);
+                    if (bgTaskRes != null) return bgTaskRes;
 
                     return $"[ERROR] 未找到工具处理逻辑 {name}";
                 }
