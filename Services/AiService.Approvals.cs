@@ -196,7 +196,7 @@ public partial class AiService
 
         // The HTTP client can leave while the approved operation is running.
         var result = await ExecuteToolAsync(operation.Tool, arguments, (_, _) => Task.CompletedTask,
-            assumeConfirmed: true, userId: userId);
+            assumeConfirmed: true, userId: userId, isApprovalReplay: true);
         lock (_approvalLock)
         {
             var success = !result.StartsWith("[ERROR]", StringComparison.Ordinal);

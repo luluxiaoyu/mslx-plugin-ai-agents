@@ -116,7 +116,10 @@ const aiSettingsForm = ref({
   aiModelName: 'deepseek-chat',
   aiContextLength: '256k',
   aiTerminalAutoApprove: false,
+  fullPermissionMode: false,
 });
+
+const fullPermissionActive = ref(false);
 
 const contextConfig = ref({
   maxLabel: '256k',
@@ -124,13 +127,16 @@ const contextConfig = ref({
   basePromptTokens: 15000,
 });
 
-const applyContextSettingsMeta = (res?: { aiContextLength?: string; aiContextTokens?: number; basePromptTokens?: number }) => {
+const applyContextSettingsMeta = (res?: { aiContextLength?: string; aiContextTokens?: number; basePromptTokens?: number; fullPermissionMode?: boolean }) => {
   if (!res) return;
   contextConfig.value = {
     maxLabel: res.aiContextLength || contextConfig.value.maxLabel || '256k',
     maxTokens: res.aiContextTokens && res.aiContextTokens > 0 ? res.aiContextTokens : contextConfig.value.maxTokens,
     basePromptTokens: res.basePromptTokens && res.basePromptTokens > 0 ? res.basePromptTokens : contextConfig.value.basePromptTokens,
   };
+  if (typeof res.fullPermissionMode === 'boolean') {
+    fullPermissionActive.value = res.fullPermissionMode;
+  }
 };
 
 let contextSettingsLoaded = false;
@@ -157,6 +163,7 @@ const openSettingsModal = async () => {
         aiModelName: res.aiModelName || 'deepseek-chat',
         aiContextLength: res.aiContextLength || '256k',
         aiTerminalAutoApprove: !!res.aiTerminalAutoApprove,
+        fullPermissionMode: !!res.fullPermissionMode,
       };
       applyContextSettingsMeta(res);
       contextSettingsLoaded = true;
@@ -182,6 +189,7 @@ const handleSaveAiSettings = async () => {
       aiModelName: aiSettingsForm.value.aiModelName.trim() || 'deepseek-chat',
       aiContextLength: aiSettingsForm.value.aiContextLength.trim(),
       aiTerminalAutoApprove: !!aiSettingsForm.value.aiTerminalAutoApprove,
+      fullPermissionMode: !!aiSettingsForm.value.fullPermissionMode,
     });
     applyContextSettingsMeta(saved);
     if (saved?.aiContextLength) {
@@ -915,6 +923,9 @@ onBeforeUnmount(() => {
               <t-tag v-if="getCurrentServerId()" theme="primary" variant="outline" size="small" style="margin-left: 8px">
                 当前选中服: #{{ getCurrentServerId() }}
               </t-tag>
+              <t-tag v-if="fullPermissionActive" theme="warning" variant="light" size="small" style="margin-left: 6px">
+                完全权限
+              </t-tag>
             </template>
           </div>
           <div class="header-actions">
@@ -1140,6 +1151,9 @@ onBeforeUnmount(() => {
               <span>MSLX AI 智能运维助手</span>
               <t-tag v-if="getCurrentServerId()" theme="primary" variant="outline" size="small" style="margin-left: 8px">
                 当前选中服: #{{ getCurrentServerId() }}
+              </t-tag>
+              <t-tag v-if="fullPermissionActive" theme="warning" variant="light" size="small" style="margin-left: 6px">
+                完全权限
               </t-tag>
             </template>
           </div>
@@ -1399,6 +1413,13 @@ onBeforeUnmount(() => {
           help="默认关闭：在实例目录执行终端命令时将弹出确认卡片，避免误操作；开启后 AI 可直接执行实例终端命令"
         >
           <t-switch v-model="aiSettingsForm.aiTerminalAutoApprove" />
+        </t-form-item>
+
+        <t-form-item
+          label="完全权限模式"
+          help="默认关闭。开启后 AI 所有操作（含删除文件/实例、覆盖文件、还原备份、执行终端命令）均不再弹出确认卡片，直接执行；系统会强烈提醒 AI 慎重操作并先征得您的同意"
+        >
+          <t-switch v-model="aiSettingsForm.fullPermissionMode" />
         </t-form-item>
         <t-button variant="outline" :loading="testingModel" :disabled="settingsSubmitting" @click="handleTestModel">测试模型连接</t-button>
       </div>

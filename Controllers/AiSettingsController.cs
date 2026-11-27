@@ -47,7 +47,8 @@ public class AiSettingsController : ControllerBase
                 AiContextLength = contextLabel,
                 AiContextTokens = contextTokens,
                 BasePromptTokens = _aiService.GetBaseContextTokens(),
-                AiTerminalAutoApprove = _terminalService.IsApiKeyTerminalAutoApprove()
+                AiTerminalAutoApprove = _terminalService.IsApiKeyTerminalAutoApprove(),
+                FullPermissionMode = ServerTerminalService.IsFullPermissionMode()
             }
         });
     }
@@ -67,6 +68,10 @@ public class AiSettingsController : ControllerBase
         {
             _terminalService.SetApiKeyTerminalAutoApprove(request.AiTerminalAutoApprove.Value);
         }
+        if (request.FullPermissionMode.HasValue)
+        {
+            ServerTerminalService.SetFullPermissionMode(request.FullPermissionMode.Value);
+        }
 
         return Ok(new ApiResponse<object>
         {
@@ -77,7 +82,8 @@ public class AiSettingsController : ControllerBase
                 AiContextLength = normalizedContextLength,
                 AiContextTokens = contextTokens,
                 BasePromptTokens = _aiService.GetBaseContextTokens(),
-                AiTerminalAutoApprove = _terminalService.IsApiKeyTerminalAutoApprove()
+                AiTerminalAutoApprove = _terminalService.IsApiKeyTerminalAutoApprove(),
+                FullPermissionMode = ServerTerminalService.IsFullPermissionMode()
             }
         });
     }
@@ -244,6 +250,7 @@ public class AiSettingsController : ControllerBase
             Data = new
             {
                 AllowTerminalByDefault = _terminalService.IsMcpTerminalEnabledByDefault(),
+                FullPermissionMode = ServerTerminalService.IsFullPermissionMode(),
                 Grants = _terminalService.ListActiveGrants()
             }
         });
@@ -263,7 +270,26 @@ public class AiSettingsController : ControllerBase
             Data = new
             {
                 AllowTerminalByDefault = _terminalService.IsMcpTerminalEnabledByDefault(),
+                FullPermissionMode = ServerTerminalService.IsFullPermissionMode(),
                 Grants = _terminalService.ListActiveGrants()
+            }
+        });
+    }
+
+    [HttpPost("full-permission")]
+    [Authorize(Roles = "admin")]
+    public IActionResult UpdateFullPermissionMode([FromBody] UpdateFullPermissionRequest request)
+    {
+        ServerTerminalService.SetFullPermissionMode(request.FullPermissionMode!.Value);
+        return Ok(new ApiResponse<object>
+        {
+            Code = 200,
+            Message = request.FullPermissionMode.Value
+                ? "已开启完全权限模式，AI 所有操作均将跳过审批直接执行（请慎重）"
+                : "已关闭完全权限模式，高危操作恢复为需授权审批",
+            Data = new
+            {
+                FullPermissionMode = ServerTerminalService.IsFullPermissionMode()
             }
         });
     }
@@ -295,6 +321,12 @@ public class UpdateMcpTerminalSettingsRequest
     public bool? AllowTerminalByDefault { get; set; }
 }
 
+public class UpdateFullPermissionRequest
+{
+    [Required(ErrorMessage = "fullPermissionMode 不能为空。")]
+    public bool? FullPermissionMode { get; set; }
+}
+
 public class AiSettingsRequest
 {
     public bool AiEnabled { get; set; }
@@ -307,4 +339,5 @@ public class AiSettingsRequest
     public string AiContextLength { get; set; } = ModelContextLengthHelper.DefaultContextLengthText;
 
     public bool? AiTerminalAutoApprove { get; set; }
+    public bool? FullPermissionMode { get; set; }
 }

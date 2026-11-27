@@ -6,7 +6,7 @@ import { useAiApi, statusLabels, type McpTokenModel, type ToolApproval, type Mcp
 
 const { createMcpToken, getMcpEndpointUrls, getMcpTokens, revokeMcpToken, getInstances,
   listApprovals, confirmAiToolAction, getMcpTerminalSettings, updateMcpTerminalSettings,
-  revokeMcpTerminalGrant } = useAiApi();
+  revokeMcpTerminalGrant, updateFullPermissionMode } = useAiApi();
 const endpoints = getMcpEndpointUrls();
 const permissionWarning = '拿到这把钥匙的人可以管理当前节点上的服务器，请只交给你信任的 AI 软件。';
 const transport = ref<'http' | 'sse'>('http');
@@ -345,6 +345,8 @@ const approvalLabels: Record<string, string> = {
   request_terminal_permission: '申请实例终端权限', run_server_terminal: '执行实例终端命令',
 };
 const allowTerminalByDefault = ref(false);
+const fullPermissionMode = ref(false);
+const fullPermissionSaving = ref(false);
 const terminalSettingsLoading = ref(false);
 const terminalSettingsSaving = ref(false);
 const terminalSettingsError = ref('');
@@ -376,12 +378,29 @@ async function loadTerminalSettings() {
   try {
     const res = await getMcpTerminalSettings();
     allowTerminalByDefault.value = !!res?.allowTerminalByDefault;
+    fullPermissionMode.value = !!res?.fullPermissionMode;
     terminalGrants.value = Array.isArray(res?.grants) ? res.grants : [];
     terminalSettingsError.value = '';
   } catch {
     terminalSettingsError.value = '无法读取终端权限设置。';
   } finally {
     terminalSettingsLoading.value = false;
+  }
+}
+
+async function handleToggleFullPermission(nextValue: boolean | string | number) {
+  const target = Boolean(nextValue);
+  if (fullPermissionSaving.value) return;
+  fullPermissionSaving.value = true;
+  try {
+    const res = await updateFullPermissionMode(target);
+    fullPermissionMode.value = !!res?.fullPermissionMode;
+    MessagePlugin.success(fullPermissionMode.value ? '已开启完全权限模式（请慎重操作）' : '已关闭完全权限模式');
+  } catch (error) {
+    fullPermissionMode.value = !target;
+    MessagePlugin.error(error instanceof Error ? error.message : '更新完全权限模式失败');
+  } finally {
+    fullPermissionSaving.value = false;
   }
 }
 
@@ -550,6 +569,29 @@ onBeforeUnmount(() => window.clearInterval(approvalTimer));
     </section>
 
     <section class="mcp-section terminal-policy-card" aria-labelledby="mcp-terminal-heading">
+      <div class="full-permission-row" :class="{ 'is-enabled': fullPermissionMode }">
+        <div>
+          <div class="token-heading">
+            <strong>完全权限模式</strong>
+            <t-tag v-if="fullPermissionMode" size="small" theme="warning" variant="light">已开启 · 免审批</t-tag>
+          </div>
+          <p class="config-note" style="margin-top: 4px">
+            {{ fullPermissionMode
+              ? '已开启：AI 的所有操作（含删除文件/实例、覆盖配置、还原备份、执行终端命令行）均不再需要审批，系统已要求 AI 慎重操作并先征得您的同意。'
+              : '默认关闭：删除实例/文件、覆盖写入、还原备份与未授权终端操作均需要管理员确认授权。' }}
+          </p>
+        </div>
+        <div class="terminal-switch-wrap">
+          <span>完全权限模式</span>
+          <t-switch
+            v-model="fullPermissionMode"
+            :loading="fullPermissionSaving"
+            :disabled="terminalSettingsLoading"
+            @change="handleToggleFullPermission"
+          />
+        </div>
+      </div>
+
       <div class="section-header">
         <div>
           <h2 id="mcp-terminal-heading">实例终端权限</h2>
@@ -1352,6 +1394,23 @@ html[theme-mode="dark"] .mcp-control {
   gap: 8px;
   font-size: 13px;
   font-weight: 600;
+  flex-shrink: 0;
+}
+
+.full-permission-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px 14px;
+  padding: 10px 12px;
+  border: 1px solid var(--td-component-border);
+  border-radius: 10px;
+  background: var(--td-bg-color-container);
+}
+
+.full-permission-row.is-enabled {
+  border-color: var(--td-warning-color);
 }
 
 .terminal-grants-box {

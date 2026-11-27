@@ -9,6 +9,7 @@ export interface AiSettingsModel {
   aiContextTokens?: number;
   basePromptTokens?: number;
   aiTerminalAutoApprove?: boolean;
+  fullPermissionMode?: boolean;
 }
 
 export interface AiContextStatus {
@@ -81,6 +82,7 @@ export interface McpTerminalGrant {
 
 export interface McpTerminalSettings {
   allowTerminalByDefault: boolean;
+  fullPermissionMode?: boolean;
   grants: McpTerminalGrant[];
 }
 
@@ -276,6 +278,8 @@ export function useAiApi() {
       http.post({ url: `${SETTINGS_URL}/mcp/terminal`, data: { allowTerminalByDefault } }),
     revokeMcpTerminalGrant: (grantId: string) =>
       http.delete({ url: `${SETTINGS_URL}/mcp/terminal/grants/${encodeURIComponent(grantId)}` }),
+    updateFullPermissionMode: (fullPermissionMode: boolean): Promise<{ fullPermissionMode: boolean }> =>
+      http.post({ url: `${SETTINGS_URL}/full-permission`, data: { fullPermissionMode } }),
     sendAiChatStream,
     abortAiChatStream,
     getTurnStatus,

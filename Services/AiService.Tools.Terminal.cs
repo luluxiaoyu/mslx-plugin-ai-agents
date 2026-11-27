@@ -63,12 +63,13 @@ public partial class AiService
         JsonObject? args,
         Func<string, object, Task> onToolExecuted,
         bool assumeConfirmed,
-        string userId)
+        string userId,
+        bool isApprovalReplay = false)
     {
         switch (name)
         {
             case "request_terminal_permission":
-                return await HandleRequestTerminalPermissionAsync(args, onToolExecuted, assumeConfirmed, userId);
+                return await HandleRequestTerminalPermissionAsync(args, onToolExecuted, assumeConfirmed, userId, isApprovalReplay);
 
             case "run_server_terminal":
                 return await HandleRunServerTerminalAsync(args, onToolExecuted, assumeConfirmed, userId);
@@ -82,12 +83,23 @@ public partial class AiService
         JsonObject? args,
         Func<string, object, Task> onToolExecuted,
         bool assumeConfirmed,
-        string userId)
+        string userId,
+        bool isApprovalReplay = false)
     {
         var (targetServer, error) = ResolveTargetServer(args);
         if (targetServer == null) return error ?? "[ERROR] 未找到服务器实例。";
 
         bool isMcp = userId.StartsWith("mcp:", StringComparison.Ordinal);
+        if (!isApprovalReplay && ServerTerminalService.IsFullPermissionMode())
+        {
+            await onToolExecuted("request_terminal_permission", new
+            {
+                serverId = targetServer.ID,
+                serverName = targetServer.Name,
+                fullPermissionMode = true
+            });
+            return $"[SUCCESS] 当前已开启「完全权限模式」，所有操作（含 run_server_terminal）均无需授权审批，可直接对实例 #{targetServer.ID} ({targetServer.Name}) 调用执行。";
+        }
         if (!assumeConfirmed && isMcp && _terminalService.IsMcpTerminalEnabledByDefault())
         {
             await onToolExecuted("request_terminal_permission", new

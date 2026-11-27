@@ -66,7 +66,8 @@ public partial class AiService
         string baseUrl = (string?)(config["aiBaseUrl"]) ?? "https://api.deepseek.com/v1";
         string modelName = (string?)(config["aiModelName"]) ?? "deepseek-chat";
         var (maxContextTokens, maxContextLabel) = ModelContextLengthHelper.Resolve((string?)config["aiContextLength"]);
-        var systemPrompt = AiSkillManager.GetSystemPrompt();
+        bool fullPermissionMode = ServerTerminalService.IsFullPermissionMode();
+        var systemPrompt = AiSkillManager.GetSystemPrompt(fullPermissionMode);
 
         if (string.IsNullOrWhiteSpace(apiKey))
             throw new InvalidOperationException("请在当前 AI 助手窗口打开模型设置，填写 API Key。");
@@ -120,7 +121,7 @@ public partial class AiService
                 operationId = McpRequest.GetString(details, "confirmationId") ?? operationId;
                 submitted |= McpRequest.GetString(details, "status") == "started";
                 if (!cancellationToken.IsCancellationRequested) await onToolExecuted(tool, data);
-            }, userId: userId);
+            }, assumeConfirmed: ServerTerminalService.IsFullPermissionMode(), userId: userId);
             var status = result.StartsWith("[ERROR]", StringComparison.Ordinal) ? "failed"
                 : operationId != null ? "pending" : submitted ? "submitted" : "succeeded";
             recordTool(name, status, taskId, operationId);
@@ -565,7 +566,7 @@ public partial class AiService
 
         try
         {
-            var invokeMatch = Regex.Match(contentText, @"<｜DSML｜invoke\s+name=""(?<name>[^""]+)""[^>]*>(?<body[\s\S]*?)</｜DSML｜invoke>");
+            var invokeMatch = Regex.Match(contentText, @"<｜DSML｜invoke\s+name=""(?<name>[^""]+)""[^>]*>(?<body>[\s\S]*?)</｜DSML｜invoke>");
             if (invokeMatch.Success)
             {
                 string rawName = invokeMatch.Groups["name"].Value;
@@ -618,7 +619,12 @@ public partial class AiService
 
     internal Task<string> ExecuteMcpToolAsync(string name, string argsJson, string tokenId)
     {
-        return ExecuteToolAsync(name, argsJson, (_, _) => Task.CompletedTask, userId: $"mcp:{tokenId}");
+        return ExecuteToolAsync(
+            name,
+            argsJson,
+            (_, _) => Task.CompletedTask,
+            assumeConfirmed: ServerTerminalService.IsFullPermissionMode(),
+            userId: $"mcp:{tokenId}");
     }
 
     public List<McpToolDefinition> GetMcpToolDefinitions()
@@ -1067,7 +1073,7 @@ public partial class AiService
     }
 
     private async Task<string> ExecuteToolAsync(string name, string argsJson, Func<string, object, Task> onToolExecuted,
-        bool assumeConfirmed = false, string userId = "")
+        bool assumeConfirmed = false, string userId = "", bool isApprovalReplay = false)
     {
         try
         {
@@ -1204,7 +1210,7 @@ public partial class AiService
                             args,
                             userId,
                             allowTextContent: false,
-                            trustExistingUploadOwnership: assumeConfirmed,
+                            trustExistingUploadOwnership: isApprovalReplay,
                             fallbackFileName: coreFallbackName,
                             uploadIdField: "core_file_key",
                             base64Field: "core_content_base64",
@@ -2515,9 +2521,9 @@ public partial class AiService
                     if (backupRes != null) return backupRes;
                     var resRes = await HandleResourcesToolAsync(name, args, onToolExecuted, assumeConfirmed, userId);
                     if (resRes != null) return resRes;
-                    var uploadRes = await HandleUploadToolAsync(name, args, onToolExecuted, assumeConfirmed, userId);
+                    var uploadRes = await HandleUploadToolAsync(name, args, onToolExecuted, assumeConfirmed, userId, isApprovalReplay);
                     if (uploadRes != null) return uploadRes;
-                    var terminalRes = await HandleTerminalToolAsync(name, args, onToolExecuted, assumeConfirmed, userId);
+                    var terminalRes = await HandleTerminalToolAsync(name, args, onToolExecuted, assumeConfirmed, userId, isApprovalReplay);
                     if (terminalRes != null) return terminalRes;
                     var bgTaskRes = await HandleBackgroundTaskToolAsync(name, args, onToolExecuted, userId);
                     if (bgTaskRes != null) return bgTaskRes;

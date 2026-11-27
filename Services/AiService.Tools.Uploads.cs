@@ -160,7 +160,8 @@ public partial class AiService
         JsonObject? args,
         Func<string, object, Task> onToolExecuted,
         bool assumeConfirmed,
-        string userId)
+        string userId,
+        bool isApprovalReplay = false)
     {
         switch (name)
         {
@@ -171,7 +172,7 @@ public partial class AiService
                 return await HandleInspectUploadedArchiveAsync(args, onToolExecuted, userId);
 
             case "upload_server_file":
-                return await HandleUploadServerFileAsync(args, onToolExecuted, assumeConfirmed, userId);
+                return await HandleUploadServerFileAsync(args, onToolExecuted, assumeConfirmed, userId, isApprovalReplay);
 
             case "upload_panel_image":
                 return await HandleUploadPanelImageAsync(args, onToolExecuted, userId);
@@ -392,7 +393,8 @@ public partial class AiService
         JsonObject? args,
         Func<string, object, Task> onToolExecuted,
         bool assumeConfirmed,
-        string userId)
+        string userId,
+        bool isApprovalReplay = false)
     {
         var (targetServer, error) = ResolveTargetServer(args);
         if (targetServer == null) return error ?? "[ERROR] 未找到目标服务器实例。";
@@ -423,7 +425,7 @@ public partial class AiService
             args,
             userId,
             allowTextContent: true,
-            trustExistingUploadOwnership: assumeConfirmed,
+            trustExistingUploadOwnership: isApprovalReplay,
             fallbackFileName: Path.GetFileName(targetFilePath));
 
         if (!ok)

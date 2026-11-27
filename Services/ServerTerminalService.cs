@@ -16,6 +16,7 @@ public sealed class ServerTerminalService
     private const string PluginId = "mslx-plugin-ai-agents";
     private const string McpAllowTerminalByDefaultKey = "mcpAllowTerminalByDefault";
     private const string ApiKeyTerminalAutoApproveKey = "aiTerminalAutoApprove";
+    private const string FullPermissionModeKey = "fullPermissionMode";
 
     private readonly McpTokenManager _tokenManager;
     private readonly ILogger<ServerTerminalService> _logger;
@@ -28,6 +29,17 @@ public sealed class ServerTerminalService
     {
         _tokenManager = tokenManager;
         _logger = logger;
+    }
+
+    public static bool IsFullPermissionMode()
+    {
+        var config = MSLX.SDK.MSLX.Config.GetPluginConfig(PluginId).ReadConfig();
+        return (bool?)config[FullPermissionModeKey] ?? false;
+    }
+
+    public static void SetFullPermissionMode(bool enabled)
+    {
+        MSLX.SDK.MSLX.Config.GetPluginConfig(PluginId).WriteConfigKey(FullPermissionModeKey, enabled);
     }
 
     public bool IsMcpTerminalEnabledByDefault()

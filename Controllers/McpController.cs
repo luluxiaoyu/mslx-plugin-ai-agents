@@ -30,7 +30,10 @@ public class McpController(
 
     [HttpGet("skill.md")]
     public IActionResult GetSkillMarkdown() =>
-        Content(AiSkillManager.GetSkillMarkdown(aiService.GetMcpToolDefinitions()), "text/markdown; charset=utf-8", Encoding.UTF8);
+        Content(
+            AiSkillManager.GetSkillMarkdown(aiService.GetMcpToolDefinitions(), ServerTerminalService.IsFullPermissionMode()),
+            "text/markdown; charset=utf-8",
+            Encoding.UTF8);
 
     [HttpPost("uploads")]
     [DisableRequestSizeLimit]
@@ -349,7 +352,9 @@ public class McpController(
                         Tools = new McpToolsCapability { ListChanged = false }
                     },
                     ServerInfo = new McpImplementation(),
-                    Instructions = "MSLX Minecraft Server Management Agent MCP Server."
+                    Instructions = ServerTerminalService.IsFullPermissionMode()
+                        ? "MSLX Minecraft Server Management Agent MCP Server. [FULL PERMISSION MODE ENABLED] All destructive, overwrite, backup restore/delete, and server terminal operations execute IMMEDIATELY without MCP panel approval. Act with extreme caution and explicitly confirm with the user before executing any risky or irreversible operation."
+                        : "MSLX Minecraft Server Management Agent MCP Server."
                 });
 
             case "ping":
