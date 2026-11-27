@@ -59,6 +59,13 @@ SSE 建立后，首条 `endpoint` 事件提供实际的 POST 地址 `/api/plugin
 
 只读令牌禁止调用任何上传端点与写入工具。
 
+## 实例终端命令行（run_server_terminal / request_terminal_permission）
+
+- `run_server_terminal(server_id=..., command=..., shell="auto", working_dir=..., timeout_seconds=30)`：自动切换到目标服务器实例目录后执行命令行操作（Windows 默认使用 PowerShell，macOS 默认使用 `zsh`，Linux 默认使用 `bash`）。
+- **权限规则**：MCP 面板上的「默认开启终端权限」默认关闭。
+  - 开启时：具备写权限的 MCP 令牌可直接调用 `run_server_terminal` 执行命令，无需审批。
+  - 关闭时（默认）：AI 必须先调用 `request_terminal_permission(server_id=..., duration_hours=..., duration_minutes=..., reason="...")` 申请指定实例的临时终端权限并附带使用时间，提交后由管理员在 MCP 面板的「待确认操作」审批；外部 Agent 可通过 `query_operation_status` 查询审批状态。审批通过后，在有效期内可直接对该实例调用 `run_server_terminal`。
+
 ## 令牌与来源
 
 在 MSLX 的 AI 助手面板创建和吊销 MCP 令牌。令牌过期、吊销或删除后也无法通过既有 SSE 会话继续调用。每个令牌每分钟可执行 60 次工具调用。

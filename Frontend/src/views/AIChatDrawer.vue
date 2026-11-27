@@ -114,6 +114,7 @@ const aiSettingsForm = ref({
   aiBaseUrl: 'https://api.deepseek.com/v1',
   aiModelName: 'deepseek-chat',
   aiContextLength: '256k',
+  aiTerminalAutoApprove: false,
 });
 
 const contextConfig = ref({
@@ -154,6 +155,7 @@ const openSettingsModal = async () => {
         aiBaseUrl: res.aiBaseUrl || 'https://api.deepseek.com/v1',
         aiModelName: res.aiModelName || 'deepseek-chat',
         aiContextLength: res.aiContextLength || '256k',
+        aiTerminalAutoApprove: !!res.aiTerminalAutoApprove,
       };
       applyContextSettingsMeta(res);
       contextSettingsLoaded = true;
@@ -178,6 +180,7 @@ const handleSaveAiSettings = async () => {
       aiBaseUrl: aiSettingsForm.value.aiBaseUrl.trim() || 'https://api.deepseek.com/v1',
       aiModelName: aiSettingsForm.value.aiModelName.trim() || 'deepseek-chat',
       aiContextLength: aiSettingsForm.value.aiContextLength.trim(),
+      aiTerminalAutoApprove: !!aiSettingsForm.value.aiTerminalAutoApprove,
     });
     applyContextSettingsMeta(saved);
     if (saved?.aiContextLength) {
@@ -558,6 +561,8 @@ const toolFriendlyNames: Record<string, string> = {
   upload_panel_image: '上传面板静态图片',
   upload_mslx_plugin: '上传并安装 MSLX 插件',
   update_panel_ssl: '配置面板 SSL 证书',
+  request_terminal_permission: '申请实例终端权限',
+  run_server_terminal: '在实例目录执行终端命令',
 };
 
 const getToolFriendlyName = (toolName?: string): string => {
@@ -994,11 +999,13 @@ onBeforeUnmount(() => {
                     <div class="card-body">
                       <strong>{{ getToolFriendlyName(tool.tool) }}</strong>
                       <p>实例 #{{ tool.data.serverId }} · {{ tool.data.filePath || tool.data.serverName || tool.data.targets?.join(', ') }}</p>
+                      <p v-if="tool.tool === 'run_server_terminal' && tool.data.command">命令（{{ tool.data.shell || 'auto' }} · {{ tool.data.workingDir || '/' }}）：<code>{{ tool.data.command }}</code></p>
+                      <p v-if="tool.tool === 'request_terminal_permission'">申请时长：{{ tool.data.durationText }}<span v-if="tool.data.reason"> · {{ tool.data.reason }}</span></p>
                       <p v-if="typeof tool.data.contentLength === 'number'">拟写入 {{ tool.data.contentLength }} 个字符</p>
                       <p v-if="tool.tool === 'delete_server_instance'">{{ tool.data.deleteFiles ? '删除实例和存档' : '移除实例配置，保留文件' }}</p>
                     </div>
                     <div class="card-footer">
-                      <t-button theme="danger" size="small" :disabled="!!confirmingToolId" @click="decideToolAction(tool, true)">确认执行</t-button>
+                      <t-button :theme="tool.tool === 'request_terminal_permission' ? 'primary' : 'danger'" size="small" :disabled="!!confirmingToolId" @click="decideToolAction(tool, true)">确认执行</t-button>
                       <t-button variant="outline" size="small" :disabled="!!confirmingToolId" @click="decideToolAction(tool, false)">拒绝</t-button>
                     </div>
                   </div>
@@ -1210,11 +1217,13 @@ onBeforeUnmount(() => {
                         <div class="card-body">
                           <strong>{{ getToolFriendlyName(tool.tool) }}</strong>
                           <p>实例 #{{ tool.data.serverId }} · {{ tool.data.filePath || tool.data.serverName || tool.data.targets?.join(', ') }}</p>
+                          <p v-if="tool.tool === 'run_server_terminal' && tool.data.command">命令（{{ tool.data.shell || 'auto' }} · {{ tool.data.workingDir || '/' }}）：<code>{{ tool.data.command }}</code></p>
+                          <p v-if="tool.tool === 'request_terminal_permission'">申请时长：{{ tool.data.durationText }}<span v-if="tool.data.reason"> · {{ tool.data.reason }}</span></p>
                           <p v-if="typeof tool.data.contentLength === 'number'">拟写入 {{ tool.data.contentLength }} 个字符</p>
                       <p v-if="tool.tool === 'delete_server_instance'">{{ tool.data.deleteFiles ? '删除实例和存档' : '移除实例配置，保留文件' }}</p>
                         </div>
                         <div class="card-footer">
-                          <t-button theme="danger" size="small" :disabled="!!confirmingToolId" @click="decideToolAction(tool, true)">确认执行</t-button>
+                          <t-button :theme="tool.tool === 'request_terminal_permission' ? 'primary' : 'danger'" size="small" :disabled="!!confirmingToolId" @click="decideToolAction(tool, true)">确认执行</t-button>
                           <t-button variant="outline" size="small" :disabled="!!confirmingToolId" @click="decideToolAction(tool, false)">拒绝</t-button>
                         </div>
                       </div>
@@ -1356,6 +1365,13 @@ onBeforeUnmount(() => {
             v-model="aiSettingsForm.aiContextLength"
             placeholder="默认 256k（如 128k、256k、1M）"
           />
+        </t-form-item>
+
+        <t-form-item
+          label="免确认执行终端命令"
+          help="默认关闭：在实例目录执行终端命令时将弹出确认卡片，避免误操作；开启后 AI 可直接执行实例终端命令"
+        >
+          <t-switch v-model="aiSettingsForm.aiTerminalAutoApprove" />
         </t-form-item>
         <t-button variant="outline" :loading="testingModel" :disabled="settingsSubmitting" @click="handleTestModel">测试模型连接</t-button>
       </div>

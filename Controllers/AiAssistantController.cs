@@ -1,3 +1,4 @@
+using System.ComponentModel.DataAnnotations;
 using System.Text.Json.Nodes;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Http;
@@ -113,7 +114,7 @@ public class AiAssistantController : ControllerBase
     public async Task<IActionResult> ConfirmTool([FromBody] ConfirmToolRequest request)
     {
         var (success, message, data) = await _aiService.ConfirmPendingToolAsync(
-            request.ConfirmationId, request.Approved, UserId);
+            request.ConfirmationId, request.Approved, UserId, request.GrantedMinutes);
         return Ok(new { success, message, data });
     }
 }
@@ -122,6 +123,9 @@ public class ConfirmToolRequest
 {
     public string ConfirmationId { get; set; } = "";
     public bool Approved { get; set; }
+
+    [Range(1, ServerTerminalService.MaxGrantMinutes, ErrorMessage = "授权时长需在 1 分钟至 10080 分钟（7 天）之间。")]
+    public int? GrantedMinutes { get; set; }
 }
 
 public class ChatRequest

@@ -29,6 +29,7 @@ public partial class AiService
     private readonly IServiceProvider _serviceProvider;
     private readonly IMemoryCache _memoryCache;
     private readonly McpUploadService _uploadService;
+    private readonly ServerTerminalService _terminalService;
     private readonly ILogger<AiService> _logger;
 
     public AiService(
@@ -38,6 +39,7 @@ public partial class AiService
         IServiceProvider serviceProvider,
         IMemoryCache memoryCache,
         McpUploadService uploadService,
+        ServerTerminalService terminalService,
         ILogger<AiService> logger)
     {
         _httpClient = new HttpClient();
@@ -47,6 +49,7 @@ public partial class AiService
         _serviceProvider = serviceProvider;
         _memoryCache = memoryCache;
         _uploadService = uploadService;
+        _terminalService = terminalService;
         _logger = logger;
     }
 
@@ -1057,6 +1060,7 @@ public partial class AiService
         RegisterBackupFrpTools(tools);
         RegisterResourcesTools(tools);
         RegisterUploadTools(tools);
+        RegisterTerminalTools(tools);
 
         return tools;
     }
@@ -2512,6 +2516,8 @@ public partial class AiService
                     if (resRes != null) return resRes;
                     var uploadRes = await HandleUploadToolAsync(name, args, onToolExecuted, assumeConfirmed, userId);
                     if (uploadRes != null) return uploadRes;
+                    var terminalRes = await HandleTerminalToolAsync(name, args, onToolExecuted, assumeConfirmed, userId);
+                    if (terminalRes != null) return terminalRes;
 
                     return $"[ERROR] 未找到工具处理逻辑 {name}";
                 }

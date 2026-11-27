@@ -19,11 +19,13 @@ public class AiSettingsController : ControllerBase
 
     private readonly McpTokenManager _tokenManager;
     private readonly AiService _aiService;
+    private readonly ServerTerminalService _terminalService;
 
-    public AiSettingsController(McpTokenManager tokenManager, AiService aiService)
+    public AiSettingsController(McpTokenManager tokenManager, AiService aiService, ServerTerminalService terminalService)
     {
         _tokenManager = tokenManager;
         _aiService = aiService;
+        _terminalService = terminalService;
     }
 
     [HttpGet]
@@ -44,7 +46,8 @@ public class AiSettingsController : ControllerBase
                 AiModelName = (string?)(config["aiModelName"]) ?? "deepseek-chat",
                 AiContextLength = contextLabel,
                 AiContextTokens = contextTokens,
-                BasePromptTokens = _aiService.GetBaseContextTokens()
+                BasePromptTokens = _aiService.GetBaseContextTokens(),
+                AiTerminalAutoApprove = _terminalService.IsApiKeyTerminalAutoApprove()
             }
         });
     }
@@ -60,6 +63,10 @@ public class AiSettingsController : ControllerBase
         Config.WriteConfigKey("aiBaseUrl", request.AiBaseUrl ?? "https://api.deepseek.com/v1");
         Config.WriteConfigKey("aiModelName", request.AiModelName ?? "deepseek-chat");
         Config.WriteConfigKey("aiContextLength", normalizedContextLength);
+        if (request.AiTerminalAutoApprove.HasValue)
+        {
+            _terminalService.SetApiKeyTerminalAutoApprove(request.AiTerminalAutoApprove.Value);
+        }
 
         return Ok(new ApiResponse<object>
         {
@@ -69,7 +76,8 @@ public class AiSettingsController : ControllerBase
             {
                 AiContextLength = normalizedContextLength,
                 AiContextTokens = contextTokens,
-                BasePromptTokens = _aiService.GetBaseContextTokens()
+                BasePromptTokens = _aiService.GetBaseContextTokens(),
+                AiTerminalAutoApprove = _terminalService.IsApiKeyTerminalAutoApprove()
             }
         });
     }
@@ -224,6 +232,67 @@ public class AiSettingsController : ControllerBase
             Message = "令牌已撤销"
         });
     }
+
+    [HttpGet("mcp/terminal")]
+    [Authorize(Roles = "admin")]
+    public IActionResult GetMcpTerminalSettings()
+    {
+        return Ok(new ApiResponse<object>
+        {
+            Code = 200,
+            Message = "获取成功",
+            Data = new
+            {
+                AllowTerminalByDefault = _terminalService.IsMcpTerminalEnabledByDefault(),
+                Grants = _terminalService.ListActiveGrants()
+            }
+        });
+    }
+
+    [HttpPost("mcp/terminal")]
+    [Authorize(Roles = "admin")]
+    public IActionResult UpdateMcpTerminalSettings([FromBody] UpdateMcpTerminalSettingsRequest request)
+    {
+        _terminalService.SetMcpTerminalEnabledByDefault(request.AllowTerminalByDefault!.Value);
+        return Ok(new ApiResponse<object>
+        {
+            Code = 200,
+            Message = request.AllowTerminalByDefault.Value
+                ? "已开启 MCP 默认终端权限"
+                : "已关闭 MCP 默认终端权限，AI 需逐次申请实例临时授权",
+            Data = new
+            {
+                AllowTerminalByDefault = _terminalService.IsMcpTerminalEnabledByDefault(),
+                Grants = _terminalService.ListActiveGrants()
+            }
+        });
+    }
+
+    [HttpDelete("mcp/terminal/grants/{grantId}")]
+    [Authorize(Roles = "admin")]
+    public IActionResult RevokeMcpTerminalGrant([FromRoute] string grantId)
+    {
+        if (!_terminalService.RevokeGrant(grantId))
+        {
+            return NotFound(new ApiResponse<object>
+            {
+                Code = 404,
+                Message = "未找到指定的终端授权记录"
+            });
+        }
+
+        return Ok(new ApiResponse<object>
+        {
+            Code = 200,
+            Message = "已撤销该实例的临时终端权限"
+        });
+    }
+}
+
+public class UpdateMcpTerminalSettingsRequest
+{
+    [Required(ErrorMessage = "allowTerminalByDefault 不能为空。")]
+    public bool? AllowTerminalByDefault { get; set; }
 }
 
 public class AiSettingsRequest
@@ -236,4 +305,6 @@ public class AiSettingsRequest
     [Required(AllowEmptyStrings = false, ErrorMessage = "模型上下文长度不能为空，支持如 128k、256k、1M。")]
     [ModelContextLength]
     public string AiContextLength { get; set; } = ModelContextLengthHelper.DefaultContextLengthText;
+
+    public bool? AiTerminalAutoApprove { get; set; }
 }

@@ -61,6 +61,7 @@ public class MSLXPluginEntry : IPlugin
     public void OnRegisterServices(IServiceCollection services)
     {
         services.AddSingleton<McpUploadService>();
+        services.AddSingleton<ServerTerminalService>();
         services.AddSingleton<AiService>();
         services.AddSingleton<McpTokenManager>();
     }

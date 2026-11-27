@@ -8,6 +8,7 @@ export interface AiSettingsModel {
   aiContextLength?: string;
   aiContextTokens?: number;
   basePromptTokens?: number;
+  aiTerminalAutoApprove?: boolean;
 }
 
 export interface AiContextStatus {
@@ -52,12 +53,35 @@ export interface ToolApproval {
   serverName: string;
   target: string;
   action: string;
+  requestedMinutes?: number | null;
+  reason?: string | null;
   source: 'mcp' | 'chat';
   requester: string;
   approver?: string;
   status: string;
   createdAt: string;
   expiresAt: string;
+}
+
+export interface McpTerminalGrant {
+  id: string;
+  owner: string;
+  source: 'mcp' | 'chat';
+  requesterName: string;
+  serverId: number;
+  serverName: string;
+  grantedMinutes: number;
+  durationLabel: string;
+  reason?: string | null;
+  approver?: string | null;
+  createdAt: string;
+  expiresAt: string;
+  remainingSeconds: number;
+}
+
+export interface McpTerminalSettings {
+  allowTerminalByDefault: boolean;
+  grants: McpTerminalGrant[];
 }
 
 export interface ChatMessage {
@@ -240,9 +264,18 @@ export function useAiApi() {
       params: permanent ? { permanent: true } : undefined,
     }),
     listApprovals: (): Promise<ToolApproval[]> => http.get({ url: `${PLUGIN_URL}/ai/operations` }),
-    confirmAiToolAction: (confirmationId: string, approved: boolean):
+    confirmAiToolAction: (confirmationId: string, approved: boolean, grantedMinutes?: number):
       Promise<{ success: boolean; message: string; data?: ToolApproval }> =>
-      http.post({ url: `${PLUGIN_URL}/ai/confirm-tool`, data: { confirmationId, approved } }),
+      http.post({
+        url: `${PLUGIN_URL}/ai/confirm-tool`,
+        data: { confirmationId, approved, ...(grantedMinutes ? { grantedMinutes } : {}) },
+      }),
+    getMcpTerminalSettings: (): Promise<McpTerminalSettings> =>
+      http.get({ url: `${SETTINGS_URL}/mcp/terminal` }),
+    updateMcpTerminalSettings: (allowTerminalByDefault: boolean): Promise<McpTerminalSettings> =>
+      http.post({ url: `${SETTINGS_URL}/mcp/terminal`, data: { allowTerminalByDefault } }),
+    revokeMcpTerminalGrant: (grantId: string) =>
+      http.delete({ url: `${SETTINGS_URL}/mcp/terminal/grants/${encodeURIComponent(grantId)}` }),
     sendAiChatStream,
     abortAiChatStream,
     getTurnStatus,

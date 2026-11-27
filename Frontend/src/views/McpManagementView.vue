@@ -2,10 +2,11 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { MessagePlugin } from 'tdesign-vue-next';
 import { AddIcon, BrowseIcon, CopyIcon, RefreshIcon } from 'tdesign-icons-vue-next';
-import { useAiApi, statusLabels, type McpTokenModel, type ToolApproval } from '../api/aiApi';
+import { useAiApi, statusLabels, type McpTokenModel, type ToolApproval, type McpTerminalGrant } from '../api/aiApi';
 
 const { createMcpToken, getMcpEndpointUrls, getMcpTokens, revokeMcpToken, getInstances,
-  listApprovals, confirmAiToolAction } = useAiApi();
+  listApprovals, confirmAiToolAction, getMcpTerminalSettings, updateMcpTerminalSettings,
+  revokeMcpTerminalGrant } = useAiApi();
 const endpoints = getMcpEndpointUrls();
 const permissionWarning = '拿到这把钥匙的人可以管理当前节点上的服务器，请只交给你信任的 AI 软件。';
 const transport = ref<'http' | 'sse'>('http');
@@ -341,7 +342,80 @@ const approvalLabels: Record<string, string> = {
   copy_server_file: '复制并覆盖目标', move_server_file: '移动并覆盖目标',
   download_file_to_server: '下载并覆盖文件', compress_files: '覆盖压缩包', extract_archive: '解压并覆盖目录内容',
   manage_mod_plugin_state: '删除模组或插件', restore_server_backup: '还原备份', delete_server_backup: '删除备份',
+  request_terminal_permission: '申请实例终端权限', run_server_terminal: '执行实例终端命令',
 };
+const allowTerminalByDefault = ref(false);
+const terminalSettingsLoading = ref(false);
+const terminalSettingsSaving = ref(false);
+const terminalSettingsError = ref('');
+const terminalGrants = ref<McpTerminalGrant[]>([]);
+const revokingGrantId = ref('');
+
+function formatRemaining(seconds: number) {
+  if (seconds <= 60) return '不足 1 分钟';
+  const totalMinutes = Math.ceil(seconds / 60);
+  const hours = Math.floor(totalMinutes / 60);
+  const mins = totalMinutes % 60;
+  if (hours > 0 && mins > 0) return `${hours} 小时 ${mins} 分钟`;
+  if (hours > 0) return `${hours} 小时`;
+  return `${mins} 分钟`;
+}
+
+function formatRequestedMinutes(minutes?: number | null) {
+  if (!minutes || minutes <= 0) return '';
+  const hours = Math.floor(minutes / 60);
+  const mins = minutes % 60;
+  if (hours > 0 && mins > 0) return `${hours} 小时 ${mins} 分钟`;
+  if (hours > 0) return `${hours} 小时`;
+  return `${mins} 分钟`;
+}
+
+async function loadTerminalSettings() {
+  if (terminalSettingsLoading.value) return;
+  terminalSettingsLoading.value = true;
+  try {
+    const res = await getMcpTerminalSettings();
+    allowTerminalByDefault.value = !!res?.allowTerminalByDefault;
+    terminalGrants.value = Array.isArray(res?.grants) ? res.grants : [];
+    terminalSettingsError.value = '';
+  } catch {
+    terminalSettingsError.value = '无法读取终端权限设置。';
+  } finally {
+    terminalSettingsLoading.value = false;
+  }
+}
+
+async function handleToggleTerminalDefault(nextValue: boolean | string | number) {
+  const target = Boolean(nextValue);
+  if (terminalSettingsSaving.value) return;
+  terminalSettingsSaving.value = true;
+  try {
+    const res = await updateMcpTerminalSettings(target);
+    allowTerminalByDefault.value = !!res?.allowTerminalByDefault;
+    terminalGrants.value = Array.isArray(res?.grants) ? res.grants : terminalGrants.value;
+    MessagePlugin.success(allowTerminalByDefault.value ? '已开启默认终端权限' : '已关闭默认终端权限');
+  } catch (error) {
+    allowTerminalByDefault.value = !target;
+    MessagePlugin.error(error instanceof Error ? error.message : '更新默认终端权限失败');
+  } finally {
+    terminalSettingsSaving.value = false;
+  }
+}
+
+async function handleRevokeGrant(grant: McpTerminalGrant) {
+  if (revokingGrantId.value) return;
+  revokingGrantId.value = grant.id;
+  try {
+    await revokeMcpTerminalGrant(grant.id);
+    MessagePlugin.success(`已撤销对 #${grant.serverId} ${grant.serverName} 的临时终端授权`);
+    await loadTerminalSettings();
+  } catch (error) {
+    MessagePlugin.error(error instanceof Error ? error.message : '撤销终端授权失败');
+  } finally {
+    revokingGrantId.value = '';
+  }
+}
+
 async function loadApprovals() {
   if (approvalsLoading.value) return;
   approvalsLoading.value = true;
@@ -366,7 +440,7 @@ async function decide(operation: ToolApproval, approved: boolean) {
     MessagePlugin.error('无法获取执行结果，请刷新操作列表。');
   } finally {
     activeDecision.value = '';
-    await loadApprovals();
+    await Promise.all([loadApprovals(), loadTerminalSettings()]);
   }
 }
 
@@ -374,8 +448,12 @@ let approvalTimer: number | undefined;
 onMounted(() => {
   void loadTokens();
   void loadApprovals();
+  void loadTerminalSettings();
   approvalTimer = window.setInterval(() => {
-    if (document.visibilityState === 'visible') void loadApprovals();
+    if (document.visibilityState === 'visible') {
+      void loadApprovals();
+      void loadTerminalSettings();
+    }
   }, 10000);
 });
 onBeforeUnmount(() => window.clearInterval(approvalTimer));
@@ -461,11 +539,66 @@ onBeforeUnmount(() => window.clearInterval(approvalTimer));
       </ol>
     </section>
 
-    <details class="advanced-settings">
+    <section class="mcp-section terminal-policy-card" aria-labelledby="mcp-terminal-heading">
+      <div class="section-header">
+        <div>
+          <h2 id="mcp-terminal-heading">实例终端权限</h2>
+          <p>控制外部 Agent 是否允许在服务端实例目录内执行命令行（Windows 使用 PowerShell，macOS/Linux 使用 zsh/bash）。</p>
+        </div>
+        <div class="terminal-switch-wrap">
+          <span>默认开启终端权限</span>
+          <t-switch
+            v-model="allowTerminalByDefault"
+            :loading="terminalSettingsSaving"
+            :disabled="terminalSettingsLoading"
+            @change="handleToggleTerminalDefault"
+          />
+        </div>
+      </div>
+      <p v-if="terminalSettingsError" class="field-error" role="alert">{{ terminalSettingsError }}</p>
+      <p v-else class="config-note" style="margin-top: 0">
+        {{ allowTerminalByDefault
+          ? '已开启：具备写权限的 MCP 令牌可直接在其授权实例目录内执行命令行，无需逐次审批。'
+          : '默认关闭：AI 需要针对具体实例申请临时终端权限（附带使用小时/分钟及用途），经您在下方「待确认操作」审批通过后方可在有效期内使用。' }}
+      </p>
+      <div v-if="terminalGrants.length" class="terminal-grants-box">
+        <div class="terminal-grants-title">当前有效临时终端授权（{{ terminalGrants.length }} 项）</div>
+        <ul class="token-list">
+          <li v-for="grant in terminalGrants" :key="grant.id" class="token-row">
+            <div class="token-details">
+              <div class="token-heading">
+                <strong>#{{ grant.serverId }} {{ grant.serverName }}</strong>
+                <t-tag size="small" theme="success" variant="light">剩余 {{ formatRemaining(grant.remainingSeconds) }}</t-tag>
+              </div>
+              <div class="token-meta">
+                <span>{{ grant.requesterName }}</span>
+                <span>授权时长 {{ grant.durationLabel }}</span>
+                <span v-if="grant.reason">用途：{{ grant.reason }}</span>
+                <span v-if="grant.approver">审批人 {{ grant.approver }}</span>
+                <span>{{ formatExpiration(grant.expiresAt) }}</span>
+              </div>
+            </div>
+            <div class="token-actions">
+              <t-button
+                variant="text"
+                theme="danger"
+                size="small"
+                :loading="revokingGrantId === grant.id"
+                @click="handleRevokeGrant(grant)"
+              >
+                撤销授权
+              </t-button>
+            </div>
+          </li>
+        </ul>
+      </div>
+    </section>
+
+    <details class="advanced-settings" :open="pendingCount > 0 ? true : undefined">
       <summary>待确认操作<span v-if="pendingCount"> · {{ pendingCount }} 项</span></summary>
       <section class="advanced-content" aria-label="待确认操作">
         <div class="section-header">
-          <p>AI 申请删除或覆盖内容时，会在这里等你确认。</p>
+          <p>AI 申请终端权限、删除或覆盖内容时，会在这里等你确认。</p>
           <t-button variant="outline" size="small" :loading="approvalsLoading" @click="loadApprovals">刷新</t-button>
         </div>
         <p v-if="approvalsError" class="field-error" role="alert">{{ approvalsError }}</p>
@@ -478,10 +611,19 @@ onBeforeUnmount(() => window.clearInterval(approvalTimer));
                 <t-tag size="small" variant="light" :theme="operation.status === 'pending' ? 'warning' : 'default'">
                   {{ statusLabels[operation.status] || operation.status }}
                 </t-tag>
+                <t-tag
+                  v-if="operation.tool === 'request_terminal_permission' && operation.requestedMinutes"
+                  size="small"
+                  theme="primary"
+                  variant="light"
+                >
+                  申请 {{ formatRequestedMinutes(operation.requestedMinutes) }}
+                </t-tag>
               </div>
               <div class="token-meta">
                 <span>#{{ operation.serverId }} {{ operation.serverName }}</span>
                 <span>{{ operation.target }}</span>
+                <span v-if="operation.reason">原因：{{ operation.reason }}</span>
                 <code :title="operation.id">编号 {{ operation.id }}</code>
                 <span>{{ operation.source === 'mcp' ? operation.requester : '面板聊天' }}</span>
                 <span v-if="operation.action === 'delete_data'">同时删除文件和存档</span>
@@ -491,7 +633,14 @@ onBeforeUnmount(() => window.clearInterval(approvalTimer));
               </div>
             </div>
             <div v-if="operation.status === 'pending'" class="token-actions">
-              <t-button theme="danger" size="small" :disabled="!!activeDecision" @click="decide(operation, true)">确认执行</t-button>
+              <t-button
+                :theme="operation.tool === 'request_terminal_permission' ? 'primary' : 'danger'"
+                size="small"
+                :disabled="!!activeDecision"
+                @click="decide(operation, true)"
+              >
+                {{ operation.tool === 'request_terminal_permission' ? '批准授权' : '确认执行' }}
+              </t-button>
               <t-button variant="outline" size="small" :disabled="!!activeDecision" @click="decide(operation, false)">拒绝</t-button>
             </div>
           </li>
@@ -1178,6 +1327,33 @@ html[theme-mode="dark"] .mcp-control {
   flex: 1 1 220px;
   min-width: 0;
   color: var(--td-text-color-primary);
+}
+
+.terminal-policy-card {
+  padding: 14px;
+  border: 1px solid var(--td-component-border);
+  border-radius: 12px;
+  background: var(--td-bg-color-secondarycontainer);
+}
+
+.terminal-switch-wrap {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.terminal-grants-box {
+  display: grid;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.terminal-grants-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--td-text-color-secondary);
 }
 
 @media (pointer: coarse) {

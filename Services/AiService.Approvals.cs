@@ -30,13 +30,18 @@ public partial class AiService
 
     private void SaveApprovalsLocked() => PluginData.WriteJson(ApprovalPath, _approvals);
 
-    private string CreatePendingOperation(string toolName, string argsJson, int serverId, string target, string action, string owner)
+    private string CreatePendingOperation(string toolName, string argsJson, int serverId, string target, string action, string owner,
+        int? requestedMinutes = null, string? reason = null)
     {
         var server = MSLX.SDK.MSLX.Config.Servers.GetServerList().FirstOrDefault(item => item.ID == serverId)
             ?? throw new InvalidOperationException("目标实例已不存在。");
         var args = JsonNode.Parse(argsJson)?.AsObject() ?? new JsonObject();
         args["server_id"] = serverId;
         args.Remove("confirmed");
+        args.Remove("granted_minutes");
+        args.Remove("_grant_owner");
+        args.Remove("_approver");
+        args.Remove("_requester_name");
         var now = DateTime.UtcNow;
         var operation = new ToolApproval
         {
@@ -49,6 +54,8 @@ public partial class AiService
             BackupDirectory = server.BackupPath,
             Target = target,
             Action = action,
+            RequestedMinutes = requestedMinutes,
+            Reason = reason,
             CreatedAt = now,
             ExpiresAt = now + ApprovalLifetime,
             Arguments = args.ToJsonString()
@@ -109,6 +116,8 @@ public partial class AiService
         serverName = operation.ServerName,
         target = operation.Target,
         action = operation.Action,
+        requestedMinutes = operation.RequestedMinutes,
+        reason = operation.Reason,
         source = operation.Owner.StartsWith("mcp:", StringComparison.Ordinal) ? "mcp" : "chat",
         requester = operation.Owner.StartsWith("mcp:", StringComparison.Ordinal)
             ? _serviceProvider.GetRequiredService<McpTokenManager>().GetName(operation.Owner[4..]) ?? "已删除的 MCP 令牌"
@@ -139,7 +148,7 @@ public partial class AiService
     }
 
     public async Task<(bool Success, string Message, object? Data)> ConfirmPendingToolAsync(
-        string confirmationId, bool approved, string userId)
+        string confirmationId, bool approved, string userId, int? grantedMinutes = null)
     {
         ToolApproval operation;
         string arguments;
@@ -171,6 +180,20 @@ public partial class AiService
             if (!approved) return (true, "已拒绝，操作已取消。", DescribeApproval(operation));
         }
 
+        if (operation.Tool == "request_terminal_permission")
+        {
+            var argsObj = JsonNode.Parse(arguments)?.AsObject() ?? new JsonObject();
+            var requesterName = operation.Owner.StartsWith("mcp:", StringComparison.Ordinal)
+                ? _serviceProvider.GetRequiredService<McpTokenManager>().GetName(operation.Owner[4..]) ?? "已删除的 MCP 令牌"
+                : operation.Owner;
+            argsObj["_grant_owner"] = operation.Owner;
+            argsObj["_approver"] = userId;
+            argsObj["_requester_name"] = requesterName;
+            if (grantedMinutes is > 0)
+                argsObj["granted_minutes"] = grantedMinutes.Value;
+            arguments = argsObj.ToJsonString();
+        }
+
         // The HTTP client can leave while the approved operation is running.
         var result = await ExecuteToolAsync(operation.Tool, arguments, (_, _) => Task.CompletedTask,
             assumeConfirmed: true, userId: userId);
@@ -200,6 +223,8 @@ public partial class AiService
         public string? BackupDirectory { get; init; }
         public required string Target { get; init; }
         public required string Action { get; init; }
+        public int? RequestedMinutes { get; init; }
+        public string? Reason { get; init; }
         public required DateTime CreatedAt { get; init; }
         public required DateTime ExpiresAt { get; init; }
         public string Status { get; set; } = "pending";
